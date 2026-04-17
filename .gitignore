@@ -240,3 +240,4 @@ EOF
 *.env
 .env
 .env
+venv/

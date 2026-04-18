@@ -271,6 +271,21 @@ class RetrievalAgent:
         # Load or build FAISS index
         if os.path.exists(FAISS_INDEX_PATH):
             self.faiss_index = load_faiss_index()
+
+            # Guard — verify FAISS and chunks are in sync
+            # If ingest.py was re-run without rebuilding FAISS,
+            # the index would return wrong chunks silently
+            if self.faiss_index.ntotal != len(self.chunks):
+                logger.warning(
+                    "FAISS index is out of sync with database! "
+                    "Index has %d vectors but database has %d chunks. "
+                    "Rebuilding FAISS index...",
+                    self.faiss_index.ntotal,
+                    len(self.chunks),
+                )
+                self.faiss_index = build_vector_index(
+                    self.embed_model, self.chunks
+                )
         else:
             logger.info("No FAISS index found — building from scratch...")
             # Pass already-loaded model and chunks — avoids loading twice
@@ -409,32 +424,48 @@ class RetrievalAgent:
         ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
         return ranked[:top_k]
 
-    def search(self, question: str) -> list[dict]:
+    
+
+    def search(
+        self,
+        question: str,
+        filters: dict = None,
+    ) -> list[dict]:
         """
         Main entry point — find the most relevant chunks for a question.
 
-        Pipeline:
-            1. Semantic search  → top 20 chunks by meaning
-            2. Keyword search   → top 20 chunks by exact terms
-            3. Merge            → up to 40 unique candidates
-            4. Re-rank          → top 5 by cross-encoder score
-
         Args:
             question: The user's natural language question
+            filters:  Optional dict to narrow search scope
+                      Supported keys:
+                        - contract_id    : only search this contract
+                        - contract_title : only search this contract title
 
         Returns:
-            List of top-5 chunk dicts, each containing:
-            {
-                id, contract_id, contract_title,
-                chunk_index, text, char_start, char_end,
-                semantic_score, bm25_score, rerank_score, found_by
-            }
+            Top-5 chunk dicts with scores and metadata.
+            Returns empty list if no chunks match the filters.
         """
         logger.info("Searching for: '%s'", question[:80])
 
+        if filters:
+            logger.info("Applying filters: %s", filters)
+
         semantic = self._semantic_search(question)
-        keyword = self._keyword_search(question)
-        merged = self._merge_results(semantic, keyword)
+        keyword  = self._keyword_search(question)
+        merged   = self._merge_results(semantic, keyword)
+
+        # Apply metadata filters AFTER retrieval
+        if filters:
+            merged = self._apply_filters(merged, filters)
+
+        # Guard — if filters eliminated everything, warn and return early
+        if not merged:
+            logger.warning(
+                "No chunks remain after filtering. "
+                "Filters may be too strict: %s", filters
+            )
+            return []
+
         results = self._rerank(question, merged)
 
         logger.info(
@@ -443,7 +474,46 @@ class RetrievalAgent:
         )
 
         return results
+    
+    def _apply_filters(
+        self,
+        chunks: list[dict],
+        filters: dict,
+    ) -> list[dict]:
+        """
+        Filter retrieved chunks by metadata fields.
 
+        Called after hybrid search so we filter from already-relevant
+        results rather than limiting the search space upfront.
+
+        Args:
+            chunks:  Candidate chunks from hybrid search
+            filters: Dict of field → value to filter by
+
+        Returns:
+            Filtered list of chunks
+        """
+        filtered = chunks
+
+        if "contract_id" in filters:
+            filtered = [
+                c for c in filtered
+                if c["contract_id"] == filters["contract_id"]
+            ]
+
+        if "contract_title" in filters:
+            filtered = [
+                c for c in filtered
+                if filters["contract_title"].lower()
+                in c["contract_title"].lower()
+            ]
+
+        logger.info(
+            "After filtering: %d → %d chunks",
+            len(chunks), len(filtered),
+        )
+
+        return filtered
 
 # ---------------------------------------------------------------------------
 # Entry point — quick test
@@ -465,3 +535,34 @@ if __name__ == "__main__":
         print(f"Contract: {chunk['contract_title'][:60]}")
         print(f"Text: {chunk['text'][:200]}...")
         print()
+
+    # Test metadata filtering — same question, scoped to one contract
+    print("\n" + "═" * 60)
+    print("FILTERED SEARCH — WHITESMOKE contract only")
+    print("═" * 60)
+
+    filtered_results = agent.search(
+        question,
+        filters={"contract_title": "WHITESMOKE"}
+    )
+
+    print(f"\nQuestion: {question}")
+    print(f"Top {len(filtered_results)} results:\n")
+
+    for i, chunk in enumerate(filtered_results, 1):
+        print(f"{'─' * 60}")
+        print(f"Rank {i} | Score: {chunk['rerank_score']:.3f} | Found by: {chunk['found_by']}")
+        print(f"Contract: {chunk['contract_title'][:60]}")
+        print(f"Text: {chunk['text'][:200]}...")
+        print()
+
+    # Test empty filter — should warn and return []
+    print("\n" + "═" * 60)
+    print("EMPTY FILTER TEST — nonexistent contract")
+    print("═" * 60)
+
+    empty_results = agent.search(
+        question,
+        filters={"contract_title": "NONEXISTENT_CONTRACT_XYZ"}
+    )
+    print(f"Results returned: {len(empty_results)}")

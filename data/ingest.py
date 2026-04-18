@@ -19,7 +19,7 @@ import duckdb
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import CHUNK_OVERLAP, CHUNK_SIZE, LOCAL_DATA_PATH
+from config import CHUNK_OVERLAP, CHUNK_SIZE, LOCAL_DATA_PATH, DB_PATH
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DB_PATH = "data/contracts.db"
 CUAD_PATH = os.path.join(LOCAL_DATA_PATH, "CUAD_v1.json")
 
 

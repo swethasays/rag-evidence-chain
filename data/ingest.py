@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import hashlib 
 
 import duckdb
 
@@ -210,7 +211,8 @@ def store_ground_truth(
     answer_start: int,
 ) -> None:
     """Insert a single QA pair used later by the evaluation agent."""
-    gt_id = f"{contract_id}_{abs(hash(question))}"
+    question_hash = hashlib.sha256(question.encode()).hexdigest()[:16] 
+    gt_id = f"{contract_id}_{question_hash}"                          
     conn.execute(
         """
         INSERT OR REPLACE INTO ground_truth
@@ -253,11 +255,12 @@ def run_ingestion(max_contracts: int = 50) -> tuple[int, int]:
 
         # Concatenate all paragraph contexts into one document string.
         full_text = " ".join(p["context"] for p in contract["paragraphs"])
+        contract_id = hashlib.sha256(full_text.encode()).hexdigest()
 
-        store_contract(conn, title, title, full_text)
+        store_contract(conn, contract_id, title, full_text)
 
         chunks = chunk_text(full_text)
-        store_chunks(conn, title, chunks)
+        store_chunks(conn, contract_id, chunks)
         total_chunks += len(chunks)
 
         # Ground-truth QA pairs — one per annotated question.
@@ -266,7 +269,7 @@ def run_ingestion(max_contracts: int = 50) -> tuple[int, int]:
                 if qa["answers"]:
                     store_ground_truth(
                         conn,
-                        contract_id=title,
+                        contract_id=contract_id,
                         question=qa["question"],
                         answer=qa["answers"][0]["text"],
                         answer_start=qa["answers"][0]["answer_start"],

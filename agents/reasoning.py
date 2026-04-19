@@ -19,24 +19,38 @@ Flow:
         → return answer + evidence chain
 """
 
+import hashlib
 import json
 import logging
 import os
 import re
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 
-from groq import Groq
+import redis
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import (
+    CACHE_TTL,
+    GROQ_API_KEY,
+    LLM_MAX_TOKENS,
+    LLM_MODEL,
+    LLM_TEMPERATURE,
+    MIN_CONFIDENCE_SCORE,
+    REDIS_URL,
+)
+
+from groq import Groq, BadRequestError, AuthenticationError
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from config import GROQ_API_KEY, LLM_MODEL, MIN_CONFIDENCE_SCORE
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -49,6 +63,94 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Prompt version — increment when build_prompt() changes
+# ---------------------------------------------------------------------------
+
+# Versioning ensures we can trace which prompt produced which answer.
+# If you change build_prompt(), bump this version so old results
+# stored in cache or logs are not confused with new ones.
+PROMPT_VERSION = "v1.0"
+
+# ---------------------------------------------------------------------------
+# Groq client — lazy singleton
+# ---------------------------------------------------------------------------
+
+# Not created at module load — that would crash before API key validation.
+# Created on first call to call_groq() and reused after that.
+_groq_client: Groq | None = None
+
+
+def get_groq_client() -> Groq:
+    """
+    Return the Groq client, creating it on first call.
+
+    Lazy initialization means the module loads safely even if
+    GROQ_API_KEY is not set yet. The error surfaces at call time
+    with a clear message, not at import time with a cryptic crash.
+
+    Returns:
+        Shared Groq client instance
+
+    Raises:
+        ValueError: If GROQ_API_KEY is not set
+    """
+    global _groq_client
+
+    if _groq_client is None:
+        if not GROQ_API_KEY:
+            raise ValueError(
+                "GROQ_API_KEY is not set. "
+                "Add it to your .env file."
+            )
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+
+    return _groq_client
+
+
+# ---------------------------------------------------------------------------
+# Redis client — lazy singleton
+# ---------------------------------------------------------------------------
+
+# Not created at module load — created on first cache access.
+# Same pattern as Groq client — one connection, reused everywhere.
+_redis_client: redis.Redis | None = None
+
+
+def get_redis_client() -> redis.Redis | None:
+    """
+    Return the Redis client, creating and verifying it on first call.
+
+    If Redis is unavailable, returns None instead of a broken client.
+    On every call where client is None, retries the connection —
+    so if Redis comes back online, the system reconnects automatically.
+
+    Returns:
+        Redis client if connected, None if unavailable
+
+    Note:
+        Callers must handle None — cache is disabled when Redis is down.
+    """
+    global _redis_client
+
+    # If we have a working client, return it
+    if _redis_client is not None:
+        return _redis_client
+
+    # Try to connect and verify
+    try:
+        client = redis.from_url(REDIS_URL)
+        client.ping()
+        _redis_client = client
+        logger.info("Redis connection established at %s", REDIS_URL)
+        return _redis_client
+    except redis.RedisError as e:
+        # Don't store broken client — next call will retry
+        logger.warning(
+            "Redis unavailable at %s — caching disabled: %s",
+            REDIS_URL, e,
+        )
+        return None
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -71,19 +173,14 @@ class CitedSentence:
 
 @dataclass
 class ReasoningResult:
-    """
-    The complete output of Agent 2.
-
-    Contains the full answer as a list of cited sentences,
-    plus metadata about the overall response quality.
-    """
-    question: str                        # original question
-    sentences: list[CitedSentence]       # answer broken into cited sentences
-    overall_confidence: float            # average confidence across sentences
-    answer_found: bool                   # did LLM find a relevant answer?
-    raw_answer: str                      # full answer as plain text
-    chunks_used: list[str]               # chunk IDs cited, in order of use
-    low_confidence: bool = field(init=False)  # auto-computed flag
+    question: str
+    sentences: list[CitedSentence]
+    overall_confidence: float
+    answer_found: bool
+    raw_answer: str
+    chunks_used: list[str]
+    prompt_version: str = field(default_factory=lambda: PROMPT_VERSION)
+    low_confidence: bool = field(init=False)
 
     def __post_init__(self):
         # Auto-flag if overall confidence is below threshold
@@ -117,14 +214,14 @@ def extract_json(raw: str) -> str:
     """
     Extract a JSON object from an LLM response robustly.
 
-    LLMs are unpredictable — they may wrap JSON in code fences,
-    add explanation text before or after, or mix prose and JSON.
-    This function handles all common cases.
+    All three strategies use brace counting to handle nested objects
+    correctly. Non-greedy regex (.*?) would stop at the first closing
+    brace — wrong for nested JSON like {"sentences": [{"text": "..."}]}.
 
     Strategies tried in order:
-        1. JSON inside ```json ... ``` fences
-        2. JSON inside ``` ... ``` fences (no language tag)
-        3. Outermost { ... } block in the response
+        1. Find the { after ```json fence, count braces to closing }
+        2. Find the { after ``` fence (no language tag), count braces
+        3. Find the first { anywhere in the response, count braces
 
     Args:
         raw: Raw string returned by the LLM
@@ -133,30 +230,60 @@ def extract_json(raw: str) -> str:
         Clean JSON string ready for json.loads()
 
     Raises:
-        ValueError: If no JSON object can be found anywhere in the response
+        ValueError: If no valid balanced JSON object can be found
     """
-    # Strategy 1 — JSON inside ```json ... ``` fences
-    fence_match = re.search(r"```json\s*(\{.*?\})\s*```", raw, re.DOTALL)
-    if fence_match:
-        return fence_match.group(1).strip()
 
-    # Strategy 2 — JSON inside ``` ... ``` fences (no language tag)
-    fence_match = re.search(r"```\s*(\{.*?\})\s*```", raw, re.DOTALL)
-    if fence_match:
-        return fence_match.group(1).strip()
+    def count_braces(text: str, start: int) -> str | None:
+        """
+        Extract a balanced JSON object starting at index `start`.
 
-    # Strategy 3 — find the outermost { ... } block
-    # Handles extra text before or after the JSON
-    brace_match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if brace_match:
-        return brace_match.group(0).strip()
+        Walks forward from `start`, counting { and }.
+        Returns the complete object when depth returns to 0.
+        Returns None if braces are unbalanced.
+
+        Args:
+            text:  Full string to search
+            start: Index of the opening { to start from
+
+        Returns:
+            Balanced JSON string, or None if unbalanced
+        """
+        depth = 0
+        for i, char in enumerate(text[start:], start):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1].strip()
+        return None  # unbalanced — no matching closing brace
+
+    # Strategy 1 — find { after ```json fence
+    fence1 = re.search(r"```json\s*(\{)", raw, re.DOTALL)
+    if fence1:
+        result = count_braces(raw, fence1.start(1))
+        if result:
+            return result
+
+    # Strategy 2 — find { after ``` fence (no language tag)
+    fence2 = re.search(r"```\s*(\{)", raw, re.DOTALL)
+    if fence2:
+        result = count_braces(raw, fence2.start(1))
+        if result:
+            return result
+
+    # Strategy 3 — find the first { anywhere in the response
+    start = raw.find("{")
+    if start != -1:
+        result = count_braces(raw, start)
+        if result:
+            return result
 
     # Nothing worked — raise so caller can handle gracefully
     raise ValueError(
-        f"No JSON object found in LLM response. "
+        f"No valid balanced JSON object found in LLM response. "
         f"First 200 chars: {raw[:200]}"
     )
-
 
 def resolve_chunk(
     chunk_num: int,
@@ -194,6 +321,29 @@ def resolve_chunk(
 
     return chunk, False
 
+# ---------------------------------------------------------------------------
+# Cache helpers
+# ---------------------------------------------------------------------------
+
+def _get_cache_key(question: str, chunk_ids: list[str]) -> str:
+    """
+    Build a stable cache key from question + chunk IDs + prompt version.
+
+    Including chunk IDs means the cache invalidates automatically
+    if retrieval results change after re-ingestion.
+    Including prompt version means old cached answers don't get
+    served after build_prompt() changes.
+
+    Args:
+        question:  The user's question
+        chunk_ids: IDs of chunks passed to the LLM
+
+    Returns:
+        SHA256 hex string safe for use as a Redis key
+    """
+    # Sort chunk_ids for consistency — order shouldn't affect cache hit
+    content = f"{PROMPT_VERSION}:{question}:{'|'.join(sorted(chunk_ids))}"
+    return f"reasoning:{hashlib.sha256(content.encode()).hexdigest()}"
 
 # ---------------------------------------------------------------------------
 # Prompt builder
@@ -269,13 +419,63 @@ If the answer is not in the chunks:
 
     return prompt
 
+# ---------------------------------------------------------------------------
+# Rate limiter — token bucket
+# ---------------------------------------------------------------------------
+
+class TokenBucket:
+    """
+    Simple token bucket rate limiter for LLM API calls.
+
+    Limits how many Groq calls happen per second across all threads.
+    When the bucket is empty, calls wait until tokens refill —
+    preventing rate limit errors under concurrent load.
+
+    Args:
+        rate:     Tokens added per second (controls sustained rate)
+        capacity: Maximum tokens (controls burst size)
+    """
+
+    def __init__(self, rate: float = 2.0, capacity: float = 5.0):
+        self._rate = rate            # tokens added per second
+        self._capacity = capacity    # maximum tokens in bucket
+        self._tokens = capacity      # start full
+        self._lock = threading.Lock()
+        self._last_refill = time.monotonic()
+
+    def acquire(self) -> None:
+        """
+        Wait until a token is available, then consume one.
+
+        Blocks the calling thread if the bucket is empty.
+        Safe to call from multiple threads simultaneously.
+        """
+        while True:
+            with self._lock:
+                self._refill()
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
+            # Bucket empty — wait briefly before retrying
+            time.sleep(0.1)
+
+    def _refill(self) -> None:
+        """Add tokens proportional to elapsed time since last refill."""
+        now = time.monotonic()
+        elapsed = now - self._last_refill
+        self._tokens = min(
+            self._capacity,
+            self._tokens + elapsed * self._rate,
+        )
+        self._last_refill = now
+
+
+# Shared rate limiter — 2 calls/second sustained, burst up to 5
+_rate_limiter = TokenBucket(rate=2.0, capacity=5.0)
 
 # ---------------------------------------------------------------------------
 # LLM caller
 # ---------------------------------------------------------------------------
-
-from groq import BadRequestError, AuthenticationError
-from tenacity import retry_if_not_exception_type
 
 @retry(
     stop=stop_after_attempt(3),
@@ -292,12 +492,9 @@ def call_groq(prompt: str, model: str = LLM_MODEL) -> str:
     """
     Send a prompt to Groq and return the raw response text.
 
-    Decorated with @retry so transient API failures (network errors,
-    rate limits, timeouts) are automatically retried up to 3 times
-    with exponential backoff before raising to the caller.
-
-    Groq is used because it's the fastest free LLM inference
-    available — responses in ~1 second vs 10+ for others.
+    Uses a module-level client created once at startup — not on
+    every call. Retries up to 3 times on transient errors only.
+    Permanent errors (bad model, bad API key) raise immediately.
 
     Args:
         prompt: The complete prompt string
@@ -307,13 +504,16 @@ def call_groq(prompt: str, model: str = LLM_MODEL) -> str:
         Raw response string from the LLM
 
     Raises:
-        Exception: After 3 failed attempts
+        BadRequestError:      Immediately — permanent error, no retry
+        AuthenticationError:  Immediately — permanent error, no retry
+        Exception:            After 3 failed attempts
     """
-    client = Groq(api_key=GROQ_API_KEY)
+    # Acquire rate limit token before calling API
+    _rate_limiter.acquire()
 
     logger.info("Calling Groq LLM (model=%s)...", model)
 
-    response = client.chat.completions.create(
+    response = get_groq_client().chat.completions.create(
         model=model,
         messages=[
             {
@@ -331,14 +531,23 @@ def call_groq(prompt: str, model: str = LLM_MODEL) -> str:
         ],
         # Low temperature = deterministic, consistent JSON output
         # High temperature would risk creative but malformed responses
-        temperature=0.1,
-        # 1500 tokens is enough for a detailed cited answer
+        temperature=LLM_TEMPERATURE,
+        # Enough for a detailed cited answer
         # In production, monitor for truncation and increase if needed
-        max_tokens=1500,
+        max_tokens=LLM_MAX_TOKENS,
     )
 
     raw = response.choices[0].message.content
-    logger.info("Groq response received (%d chars).", len(raw))
+
+    # Log token usage — every token costs money in production
+    usage = response.usage
+    logger.info(
+        "Groq token usage — prompt: %d, completion: %d, total: %d",
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.total_tokens,
+    )
+
     return raw
 
 
@@ -425,13 +634,19 @@ def parse_response(
     for s in data.get("sentences", []):
         chunk_num = s.get("chunk_number", 1)
 
-        # Resolve chunk — skip sentence if LLM hallucinated chunk number
-        chunk, hallucinated = resolve_chunk(chunk_num, chunk_map, question)
+        # Resolve chunk — skip sentence if LLM hallucinated chunk number 
+        chunk, hallucinated = resolve_chunk(chunk_num, chunk_map, question) 
         if hallucinated:
             continue
 
+        # Skip empty sentences — LLM occasionally returns blank text 
+        sentence_text = s.get("text", "").strip()
+        if not sentence_text:
+            logger.warning("Skipping empty sentence from LLM response.")
+            continue
+
         cited_sentences.append(CitedSentence(
-            text=s.get("text", ""),
+            text=sentence_text,
             chunk_id=chunk["id"],
             contract_title=chunk["contract_title"],
             chunk_text=chunk["text"],
@@ -478,15 +693,9 @@ class ReasoningAgent:
 
     def __init__(self):
         logger.info("Initialising ReasoningAgent...")
-
-        # Validate API key exists before making any calls
-        if not GROQ_API_KEY:
-            raise ValueError(
-                "GROQ_API_KEY is not set. "
-                "Add it to your .env file."
-            )
-
+        # API key validated lazily on first call to call_groq()
         logger.info("ReasoningAgent ready.")
+        
 
     def reason(
         self,
@@ -510,7 +719,11 @@ class ReasoningAgent:
         Returns:
             ReasoningResult with cited sentences and confidence scores
         """
-        logger.info("Reasoning about: '%s'", question[:80])
+        logger.info(
+            "Reasoning about: '%s' (prompt_version=%s)",
+            question[:80],
+            PROMPT_VERSION,
+        )
         logger.info("Using %d chunks as context.", len(chunks))
 
         # Guard — no chunks means nothing to reason about
@@ -525,14 +738,24 @@ class ReasoningAgent:
                 chunks_used=[],
             )
 
+        # Check Redis cache — same question + chunks = same answer
+        cache_key = _get_cache_key(question, [c["id"] for c in chunks])
+        cached = self._cache_get(cache_key)
+        if cached:
+            logger.info("Cache HIT — returning cached answer instantly.")
+            return cached
+
         # Build the prompt with numbered chunks
         prompt = build_prompt(question, chunks)
 
-        # Call the LLM — retries automatically on failure
+        # Call the LLM — retries automatically on transient failures
         raw = call_groq(prompt)
 
         # Parse into structured result with citations
         result = parse_response(raw, question, chunks)
+
+        # Cache result — next identical question skips the LLM entirely
+        self._cache_set(cache_key, result)
 
         # Log the outcome clearly
         if result.answer_found:
@@ -549,7 +772,92 @@ class ReasoningAgent:
             )
 
         return result
+    
 
+    def _cache_get(self, key: str) -> "ReasoningResult | None":
+        """
+        Retrieve a cached ReasoningResult from Redis.
+
+        Returns None on cache miss, Redis unavailable, or connection error.
+        Redis failures are non-fatal — system falls back to LLM.
+        """
+        r = get_redis_client()
+        if r is None:
+            return None  # Redis down — skip cache, call LLM
+
+        try:
+            data = r.get(key)
+            if data:
+                logger.info("Cache HIT for key: %s...", key[:20])
+                return self._deserialize(data)
+        except redis.RedisError as e:
+            # Connection dropped mid-session — reset so next call retries
+            global _redis_client
+            _redis_client = None
+            logger.warning("Redis read failed, resetting connection: %s", e)
+        return None
+
+    def _cache_set(self, key: str, result: "ReasoningResult") -> None:
+        """
+        Store a ReasoningResult in Redis with TTL expiry.
+
+        Redis failures are non-fatal — answer still returned to user.
+        """
+        r = get_redis_client()
+        if r is None:
+            return  # Redis down — skip cache silently
+
+        try:
+            r.setex(key, CACHE_TTL, self._serialize(result))
+            logger.info("Result cached with TTL=%ds.", CACHE_TTL)
+        except redis.RedisError as e:
+            # Connection dropped mid-session — reset so next call retries
+            global _redis_client
+            _redis_client = None
+            logger.warning("Redis write failed, resetting connection: %s", e)
+
+    def _serialize(self, result: "ReasoningResult") -> str:
+        """Serialize ReasoningResult to JSON string for Redis storage."""
+        return json.dumps({
+            "question": result.question,
+            "overall_confidence": result.overall_confidence,
+            "answer_found": result.answer_found,
+            "raw_answer": result.raw_answer,
+            "chunks_used": result.chunks_used,
+            "prompt_version": result.prompt_version,
+            "sentences": [
+                {
+                    "text": s.text,
+                    "chunk_id": s.chunk_id,
+                    "contract_title": s.contract_title,
+                    "chunk_text": s.chunk_text,
+                    "confidence": s.confidence,
+                }
+                for s in result.sentences
+            ],
+        })
+
+    def _deserialize(self, data: bytes) -> "ReasoningResult":
+        """Deserialize JSON bytes from Redis back into ReasoningResult."""
+        d = json.loads(data)
+        return ReasoningResult(
+            question=d["question"],
+            sentences=[
+                CitedSentence(
+                    text=s["text"],
+                    chunk_id=s["chunk_id"],
+                    contract_title=s["contract_title"],
+                    chunk_text=s["chunk_text"],
+                    confidence=s["confidence"],
+                )
+                for s in d["sentences"]
+            ],
+            overall_confidence=d["overall_confidence"],
+            answer_found=d["answer_found"],
+            raw_answer=d["raw_answer"],
+            chunks_used=d["chunks_used"],
+            prompt_version=d.get("prompt_version", "unknown"),
+        )
 
 # ---------------------------------------------------------------------------
 # Entry point — quick test

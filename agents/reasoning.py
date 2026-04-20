@@ -209,6 +209,26 @@ def clamp(value: float, min_val: float, max_val: float) -> float:
     """
     return max(min_val, min(max_val, value))
 
+def clean_title(title: str) -> str:
+    """
+    Extract a readable contract name from a raw CUAD filename.
+
+    CUAD titles look like:
+        ADAMSGOLFINC_03_21_2005-EX-10.17-ENDORSEMENT AGREEMENT
+    We want:
+        ENDORSEMENT AGREEMENT
+
+    Args:
+        title: Raw CUAD contract title
+
+    Returns:
+        Clean readable contract name
+    """
+    if " - " in title:
+        return title.split(" - ")[-1].strip()
+    parts = title.split("_")
+    return " ".join(parts[-3:]).strip() if len(parts) > 3 else title
+
 
 def extract_json(raw: str) -> str:
     """
@@ -371,7 +391,7 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
     for i, chunk in enumerate(chunks, 1):
         chunk_context += f"""
 CHUNK {i} (ID: {chunk['id']})
-Contract: {chunk['contract_title']}
+Contract: {clean_title(chunk['contract_title'])}
 Text: {chunk['text']}
 {"─" * 40}
 """

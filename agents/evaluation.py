@@ -28,8 +28,9 @@ import logging
 import os
 import string
 import sys
-from dataclasses import dataclass, field
+import time
 import uuid
+from dataclasses import dataclass, field
 
 import duckdb
 
@@ -530,6 +531,10 @@ class EvaluationAgent:
 
         # Step 3 — score faithfulness (LLM judge)
         faithfulness_score = score_faithfulness(question, reasoning_result)
+
+        # Brief pause — judge model has stricter rate limits
+        # Prevents 429 when faithfulness and relevance calls are back to back
+        #time.sleep(2)
 
         # Step 4 — score answer relevance (LLM judge)
         answer_relevance = score_answer_relevance(question, reasoning_result)

@@ -16,7 +16,7 @@ LLM_MAX_TOKENS = 1500
 # ── EVALUATION ───────────────────────────────────────────
 # Deliberately different from LLM_MODEL to avoid self-grading bias
 # A model should never judge its own outputs
-LLM_JUDGE_MODEL = "openai/gpt-oss-20b"
+LLM_JUDGE_MODEL = "llama-3.1-8b-instant" #"openai/gpt-oss-20b"
 
 # ── EMBEDDINGS ───────────────────────────────────
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
@@ -64,6 +64,6 @@ RATE_LIMIT = "10/minute"
 # Weights for overall score calculation
 # Must sum to 1.0
 # Retrieval weighted highest — root cause of most RAG failures
-EVAL_WEIGHT_RETRIEVAL    = 0.4
-EVAL_WEIGHT_FAITHFULNESS = 0.4
-EVAL_WEIGHT_RELEVANCE    = 0.2
+EVAL_WEIGHT_RETRIEVAL    = 0.0
+EVAL_WEIGHT_FAITHFULNESS = 0.5
+EVAL_WEIGHT_RELEVANCE    = 0.5

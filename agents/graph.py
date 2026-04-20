@@ -226,13 +226,26 @@ def route_after_evaluation(state: PipelineState) -> str:
         logger.info("Route: PASS → returning answer to user.")
         return "end"
 
-    # retry_count is incremented inside retrieve_node before routing
-    # so we use <= to get MAX_RETRIES actual retries (not MAX_RETRIES - 1)
-    if eval_result.retrieval_score < MIN_RETRIEVAL_SCORE and retry_count <= MAX_RETRIES:
+    # Don't retry if evaluation itself failed — scores are meaningless zeros
+    # not genuine retrieval failures
+    eval_failed = (
+        eval_result.retrieval_score == 0.0
+        and eval_result.faithfulness_score == 0.0
+        and eval_result.answer_relevance == 0.0
+        and "Evaluation failed" in (eval_result.failure_reason or "")
+    )
+
+    if (
+        not eval_failed
+        and eval_result.retrieval_score < MIN_RETRIEVAL_SCORE
+        # retry_count is incremented inside retrieve_node before routing
+        # so we use <= to get MAX_RETRIES actual retries (not MAX_RETRIES - 1)
+        and retry_count <= MAX_RETRIES
+    ):
         logger.info(
             "Route: RETRY → retrieval score %.2f below %.2f (attempt %d/%d).",
             eval_result.retrieval_score, MIN_RETRIEVAL_SCORE,
-            retry_count + 1, MAX_RETRIES,
+            retry_count, MAX_RETRIES + 1,
         )
         return "retry"
 

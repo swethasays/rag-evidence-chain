@@ -39,7 +39,14 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger(__name__)
+
+from observability.logging import get_logger
+from observability.tracing import setup_tracing
+
+logger = get_logger(__name__)
+
+# Enable LangSmith tracing if API key is configured
+setup_tracing()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -412,8 +419,12 @@ class RAGPipeline:
             "filters": filters,
         }
 
-        # Run the graph
-        final_state = self.graph.invoke(initial_state)
+        # Run the graph — timed for tracing
+        from observability.tracing import Timer, trace_pipeline_run
+
+        with Timer() as t:
+            final_state = self.graph.invoke(initial_state)
+
 
         # Package result for the API/UI layer
         # Guard — reasoning or eval may be None if pipeline failed mid-run
@@ -436,7 +447,7 @@ class RAGPipeline:
             }
 
         # Package result for the API/UI layer
-        return {
+        result = {
             "question":           question,
             "answer":             final_state["final_answer"],
             "sentences":          [
@@ -459,6 +470,11 @@ class RAGPipeline:
             "passed":             eval_result.passed,
             "chunks_used":        reasoning_result.chunks_used,
         }
+
+        # Trace the completed run
+        trace_pipeline_run(question, result, t.elapsed_ms)
+
+        return result
 
 
 # ---------------------------------------------------------------------------

@@ -74,6 +74,7 @@ class PipelineState(TypedDict):
     needs_human_review: bool                # flagged for human review
     retry_count: int                        # how many times retrieval retried
     error: str                              # error message if pipeline fails
+    filters: dict | None  
 
 
 # ---------------------------------------------------------------------------
@@ -81,26 +82,11 @@ class PipelineState(TypedDict):
 # ---------------------------------------------------------------------------
 
 def retrieve_node(state: PipelineState, retrieval_agent: RetrievalAgent) -> dict:
-    """
-    Node 1 — retrieve relevant chunks using Agent 1.
-
-    On first attempt uses standard TOP_K_RETRIEVAL.
-    On retry, expands top_k to search wider — giving the reasoning
-    agent more context to work with when initial retrieval scores low.
-
-    Args:
-        state:           Current pipeline state
-        retrieval_agent: Shared RetrievalAgent instance
-
-    Returns:
-        Updated state keys: chunks, retry_count
-    """
+    """..."""
     question    = state["question"]
     retry_count = state.get("retry_count", 0)
+    filters     = state.get("filters", None)  # ← get filters from state
 
-    # Expand search on retry — more candidates means better chance
-    # of finding relevant chunks that scored below top_k cutoff
-    # Retry 1: top_k * 2, Retry 2: top_k * 3
     expanded_top_k = TOP_K_RETRIEVAL * (1 + retry_count)
 
     logger.info(
@@ -110,11 +96,14 @@ def retrieve_node(state: PipelineState, retrieval_agent: RetrievalAgent) -> dict
         question[:60],
     )
 
-    # Temporarily override top_k for this search
-    original_top_k = retrieval_agent.faiss_index.ntotal  # just for logging
-    chunks = retrieval_agent._semantic_search(question, top_k=expanded_top_k)
+    chunks         = retrieval_agent._semantic_search(question, top_k=expanded_top_k)
     keyword_chunks = retrieval_agent._keyword_search(question, top_k=expanded_top_k)
-    merged = retrieval_agent._merge_results(chunks, keyword_chunks)
+    merged         = retrieval_agent._merge_results(chunks, keyword_chunks)
+
+    # Apply filters before reranking — not after
+    if filters:
+        merged = retrieval_agent._apply_filters(merged, filters)
+
     reranked = retrieval_agent._rerank(question, merged)
 
     logger.info(
@@ -124,9 +113,8 @@ def retrieve_node(state: PipelineState, retrieval_agent: RetrievalAgent) -> dict
 
     return {
         "chunks": reranked,
-        "retry_count": retry_count + 1,  # increment for next iteration
+        "retry_count": retry_count + 1,
     }
-
 
 def reason_node(state: PipelineState, reasoning_agent: ReasoningAgent) -> dict:
     """
@@ -189,7 +177,7 @@ def evaluate_node(state: PipelineState, evaluation_agent: EvaluationAgent) -> di
             "Evaluation node failed unexpectedly: %s. "
             "Returning fallback result and flagging for human review.", e,
         )
-        
+
         eval_result = EvaluationResult(
             question=reasoning_result.question,
             retrieval_score=0.0,
@@ -395,6 +383,7 @@ class RAGPipeline:
             "needs_human_review": False,
             "retry_count": 0,
             "error": "",
+            "filters": filters,
         }
 
         # Run the graph

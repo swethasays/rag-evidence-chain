@@ -244,44 +244,44 @@ def run_ingestion(max_contracts: int = 50) -> tuple[int, int]:
     os.makedirs(LOCAL_DATA_PATH, exist_ok=True)
 
     conn = setup_database()
-    data = load_cuad()
-
     contracts_processed = 0
     total_chunks = 0
 
-    for contract in data["data"][:max_contracts]:
-        title = contract["title"]
+    try:
+        data = load_cuad()
 
-        # Concatenate all paragraph contexts into one document string.
-        full_text = " ".join(p["context"] for p in contract["paragraphs"])
-        contract_id = hashlib.sha256(full_text.encode()).hexdigest()
+        for contract in data["data"][:max_contracts]:
+            title = contract["title"]
+            full_text = " ".join(p["context"] for p in contract["paragraphs"])
+            contract_id = hashlib.sha256(full_text.encode()).hexdigest()
 
-        store_contract(conn, contract_id, title, full_text)
+            store_contract(conn, contract_id, title, full_text)
 
-        chunks = chunk_text(full_text)
-        store_chunks(conn, contract_id, chunks)
-        total_chunks += len(chunks)
+            chunks = chunk_text(full_text)
+            store_chunks(conn, contract_id, chunks)
+            total_chunks += len(chunks)
 
-        # Ground-truth QA pairs — one per annotated question.
-        for para in contract["paragraphs"]:
-            for qa in para["qas"]:
-                if qa["answers"]:
-                    store_ground_truth(
-                        conn,
-                        contract_id=contract_id,
-                        question=qa["question"],
-                        answer=qa["answers"][0]["text"],
-                        answer_start=qa["answers"][0]["answer_start"],
-                    )
+            for para in contract["paragraphs"]:
+                for qa in para["qas"]:
+                    if qa["answers"]:
+                        store_ground_truth(
+                            conn,
+                            contract_id=contract_id,
+                            question=qa["question"],
+                            answer=qa["answers"][0]["text"],
+                            answer_start=qa["answers"][0]["answer_start"],
+                        )
 
-        contracts_processed += 1
-        logger.info(
-            "✅ %d/%d  —  %s  —  %d chunks",
-            contracts_processed,
-            max_contracts,
-            title[:60],
-            len(chunks),
-        )
+            contracts_processed += 1
+            logger.info(
+                "✅ %d/%d  —  %s  —  %d chunks",
+                contracts_processed, max_contracts,
+                title[:60], len(chunks),
+            )
+
+    finally:
+        # Always close — even if exception raised mid-ingestion
+        conn.close()
 
     logger.info("-" * 60)
     logger.info("Ingestion complete")
@@ -290,7 +290,6 @@ def run_ingestion(max_contracts: int = 50) -> tuple[int, int]:
     logger.info("  Database  : %s", DB_PATH)
     logger.info("-" * 60)
 
-    conn.close()
     return contracts_processed, total_chunks
 
 

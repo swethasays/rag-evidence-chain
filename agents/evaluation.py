@@ -127,8 +127,6 @@ def get_ground_truth(
     Returns:
         List of ground truth dicts
     """
-    conn = duckdb.connect(db_path)
-
     # Extract meaningful keywords — skip common words
     stopwords = {"what", "is", "the", "a", "an", "are", "does",
                  "do", "in", "of", "for", "this", "that", "and"}
@@ -144,7 +142,6 @@ def get_ground_truth(
     ]
 
     if not keywords:
-        conn.close()
         return []
 
     # Build parameterized query — one ? per keyword
@@ -157,17 +154,16 @@ def get_ground_truth(
     # Wrap each keyword in % for LIKE matching
     params = [f"%{kw}%" for kw in keywords]
 
-    rows = conn.execute(f"""
-        SELECT
-            answer,
-            answer_start,
-            contract_id
-        FROM ground_truth
-        WHERE {placeholders}
-        LIMIT 10
-    """, params).fetchall()
-
-    conn.close()
+    with duckdb.connect(db_path) as conn:
+        rows = conn.execute(f"""
+            SELECT
+                answer,
+                answer_start,
+                contract_id
+            FROM ground_truth
+            WHERE {placeholders}
+            LIMIT 10
+        """, params).fetchall()
 
     logger.info(
         "Ground truth search: keywords=%s, found=%d matches",
@@ -459,24 +455,23 @@ class EvaluationAgent:
         over time. Week-over-week score changes reveal regressions
         or improvements in the pipeline.
         """
-        conn = duckdb.connect(self.db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS evaluations (
-                id                 VARCHAR PRIMARY KEY,
-                question           VARCHAR,
-                retrieval_score    FLOAT,
-                faithfulness_score FLOAT,
-                answer_relevance   FLOAT,
-                overall_score      FLOAT,
-                passed             BOOLEAN,
-                needs_human_review BOOLEAN,
-                failure_reason     VARCHAR,
-                ground_truth_found BOOLEAN,
-                prompt_version     VARCHAR,
-                created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.close()
+        with duckdb.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS evaluations (
+                    id                 VARCHAR PRIMARY KEY,
+                    question           VARCHAR,
+                    retrieval_score    FLOAT,
+                    faithfulness_score FLOAT,
+                    answer_relevance   FLOAT,
+                    overall_score      FLOAT,
+                    passed             BOOLEAN,
+                    needs_human_review BOOLEAN,
+                    failure_reason     VARCHAR,
+                    ground_truth_found BOOLEAN,
+                    prompt_version     VARCHAR,
+                    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
         logger.info("Evaluation storage ready.")
 
     def evaluate(
@@ -602,33 +597,31 @@ class EvaluationAgent:
             result:         The evaluation result to store
             prompt_version: Which prompt version produced the answer
         """
-
         # UUID — every evaluation gets a unique ID
         # Never overwrites — full history preserved for trend tracking
         eval_id = str(uuid.uuid4())
 
-        conn = duckdb.connect(self.db_path)
-        conn.execute("""
-            INSERT INTO evaluations (
-                id, question, retrieval_score, faithfulness_score,
-                answer_relevance, overall_score, passed,
-                needs_human_review, failure_reason,
-                ground_truth_found, prompt_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [
-            eval_id,
-            result.question,
-            result.retrieval_score,
-            result.faithfulness_score,
-            result.answer_relevance,
-            result.overall_score,
-            result.passed,
-            result.needs_human_review,
-            result.failure_reason,
-            result.ground_truth_found,
-            prompt_version,
-        ])
-        conn.close()
+        with duckdb.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO evaluations (
+                    id, question, retrieval_score, faithfulness_score,
+                    answer_relevance, overall_score, passed,
+                    needs_human_review, failure_reason,
+                    ground_truth_found, prompt_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                eval_id,
+                result.question,
+                result.retrieval_score,
+                result.faithfulness_score,
+                result.answer_relevance,
+                result.overall_score,
+                result.passed,
+                result.needs_human_review,
+                result.failure_reason,
+                result.ground_truth_found,
+                prompt_version,
+            ])
         logger.info("Evaluation result stored (id=%s).", eval_id)
 
 

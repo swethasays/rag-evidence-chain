@@ -186,23 +186,20 @@ def load_chunks_from_db(db_path: str = DB_PATH) -> list[dict]:
     Returns:
         List of dicts: {id, contract_id, chunk_index, text, char_start, char_end}
     """
-    conn = duckdb.connect(db_path)
-
-    rows = conn.execute("""
-        SELECT
-            c.id,
-            c.contract_id,
-            c.chunk_index,
-            c.text,
-            c.char_start,
-            c.char_end,
-            ct.title as contract_title
-        FROM chunks c
-        JOIN contracts ct ON c.contract_id = ct.id
-        ORDER BY c.contract_id, c.chunk_index
-    """).fetchall()
-
-    conn.close()
+    with duckdb.connect(db_path) as conn:
+        rows = conn.execute("""
+            SELECT
+                c.id,
+                c.contract_id,
+                c.chunk_index,
+                c.text,
+                c.char_start,
+                c.char_end,
+                ct.title as contract_title
+            FROM chunks c
+            JOIN contracts ct ON c.contract_id = ct.id
+            ORDER BY c.contract_id, c.chunk_index
+        """).fetchall()
 
     chunks = [
         {

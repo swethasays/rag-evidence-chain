@@ -152,6 +152,13 @@ def get_redis_client() -> redis.Redis | None:
         )
         return None
 
+
+def reset_redis_client() -> None:
+    """Reset the Redis client so next call to get_redis_client() retries."""
+    global _redis_client
+    _redis_client = None
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -812,8 +819,7 @@ class ReasoningAgent:
                 return self._deserialize(data)
         except redis.RedisError as e:
             # Connection dropped mid-session — reset so next call retries
-            global _redis_client
-            _redis_client = None
+            reset_redis_client()
             logger.warning("Redis read failed, resetting connection: %s", e)
         return None
 
@@ -832,8 +838,7 @@ class ReasoningAgent:
             logger.info("Result cached with TTL=%ds.", CACHE_TTL)
         except redis.RedisError as e:
             # Connection dropped mid-session — reset so next call retries
-            global _redis_client
-            _redis_client = None
+            reset_redis_client()
             logger.warning("Redis write failed, resetting connection: %s", e)
 
     def _serialize(self, result: "ReasoningResult") -> str:

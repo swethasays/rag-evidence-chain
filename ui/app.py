@@ -7,9 +7,10 @@ Usage:
     streamlit run ui/app.py
 """
 
-import sys
+import hashlib
 import os
 import re
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -350,6 +351,35 @@ def clean_contract_name(raw: str) -> str:
         return f"{co} — {desc} ({year})" if year else f"{co} — {desc}"
     return ' '.join(w.capitalize() for w in raw.replace('_', ' ').replace('-', ' ').split())[:80]
 
+def make_unique_display_names(contracts: list[str]) -> dict:
+    """
+    Map raw contract titles to unique display names.
+
+    If two contracts produce the same clean name, append a short
+    hash to distinguish them — prevents silent collision in dropdown.
+
+    Returns:
+        {raw_title: display_name}
+    """
+    seen   = {}   # clean_name → first raw title that produced it
+    result = {}   # raw_title  → display name
+
+    for raw in contracts:
+        name = clean_contract_name(raw)
+        if name in seen:
+            # Collision — append short hash to distinguish
+            short       = hashlib.sha256(raw.encode()).hexdigest()[:4]
+            result[raw] = f"{name} [{short}]"
+            # Fix the first entry too if not already fixed
+            first_raw = seen[name]
+            if not result[first_raw].endswith("]"):
+                first_short         = hashlib.sha256(first_raw.encode()).hexdigest()[:4]
+                result[first_raw]   = f"{name} [{first_short}]"
+        else:
+            seen[name]  = raw
+            result[raw] = name
+
+    return result
 
 def score_color(v: float) -> str:
     return "#4caf7d" if v >= 0.7 else "#e8b84b" if v >= 0.5 else "#e06060"
@@ -459,7 +489,7 @@ st.markdown("""
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 st.markdown(
-    "<p style='color:#ffffff; font-size:0.75rem; font-family:DM Mono,monospace;'>"
+    "<p style='color:#ffffff; font-size:0.75rem; font-family:IBM Plex Mono,monospace;'>"
     "💡 510 contracts available — searchable dropdown coming after full ingestion</p>",
     unsafe_allow_html=True,
 )
@@ -478,7 +508,7 @@ if "trigger_search" not in st.session_state:
 # ---------------------------------------------------------------------------
 
 contracts      = load_contracts()
-clean_names    = {raw: clean_contract_name(raw) for raw in contracts}
+clean_names    = make_unique_display_names(contracts)
 display_opts   = ["All contracts"] + [clean_names[c] for c in contracts]
 display_to_raw = {clean_names[r]: r for r in contracts}
 
@@ -525,7 +555,7 @@ if not question.strip():
         unsafe_allow_html=True,
     )
     suggestions_html = "".join([
-        f'<span class="sug-pill" onclick="void(0)">{sug}</span>'
+        f'<span class="sug-pill">{sug}</span>'
         for sug in SUGGESTED_QUESTIONS
     ])
     st.markdown(f'<div class="sug-row">{suggestions_html}</div>', unsafe_allow_html=True)

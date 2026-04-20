@@ -17,6 +17,8 @@ import hashlib
 
 import duckdb
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import CHUNK_OVERLAP, CHUNK_SIZE, LOCAL_DATA_PATH, DB_PATH
@@ -45,10 +47,10 @@ CUAD_PATH = os.path.join(LOCAL_DATA_PATH, "CUAD_v1.json")
 
 def setup_database(db_path: str = DB_PATH) -> duckdb.DuckDBPyConnection:
     """
-    Create the DuckDB database and the three tables we need:
-      - contracts    : one row per contract
-      - chunks       : one row per text chunk
-      - ground_truth : one row per QA pair (used by the eval agent)
+    Create the DuckDB database and the three tables we need.
+
+    Returns an open connection intentionally — caller is responsible
+    for closing it. run_ingestion() wraps this in try/finally.
     """
     conn = duckdb.connect(db_path)
 
@@ -135,7 +137,6 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     Returns:
         List of dicts: {text, char_start, char_end}
     """
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     # Try to split on natural boundaries first
     # Falls back to smaller units if chunk is still too big
@@ -154,6 +155,16 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     for raw in raw_chunks:
         # Find where this chunk starts in the original text
         char_start = text.find(raw[:50], search_start)
+
+        # Guard — if chunk text not found, fall back to search_start
+        if char_start == -1:
+            logger.warning(
+                "Could not locate chunk in original text — "
+                "using search_start as fallback. Chunk: '%s...'",
+                raw[:40],
+            )
+            char_start = search_start
+
         char_end = char_start + len(raw)
 
         chunks.append({

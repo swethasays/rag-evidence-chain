@@ -74,15 +74,28 @@ class PipelineState(TypedDict):
     needs_human_review: bool                # flagged for human review
     retry_count: int                        # how many times retrieval retried
     error: str                              # error message if pipeline fails
-    filters: dict | None  
-
+    filters: dict | None
 
 # ---------------------------------------------------------------------------
 # Node functions
 # ---------------------------------------------------------------------------
 
 def retrieve_node(state: PipelineState, retrieval_agent: RetrievalAgent) -> dict:
-    """..."""
+    """
+    Node 1 — retrieve relevant chunks using Agent 1.
+
+    On first attempt uses standard TOP_K_RETRIEVAL.
+    On retry, expands top_k to search wider — giving the reasoning
+    agent more context to work with when initial retrieval scores low.
+    Applies contract filters before reranking if provided.
+
+    Args:
+        state:           Current pipeline state
+        retrieval_agent: Shared RetrievalAgent instance
+
+    Returns:
+        Updated state keys: chunks, retry_count
+    """
     question    = state["question"]
     retry_count = state.get("retry_count", 0)
     filters     = state.get("filters", None)  # ← get filters from state
@@ -294,7 +307,7 @@ class RAGPipeline:
 
         logger.info("RAGPipeline ready.")
 
-    def _build_graph(self) -> any:
+    def _build_graph(self):
         """
         Build the LangGraph state graph.
 

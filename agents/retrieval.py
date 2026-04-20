@@ -32,7 +32,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     DB_PATH,
     EMBEDDING_MODEL,
-    EMBEDDING_DIM,
     FAISS_INDEX_PATH,
     TOP_K_RETRIEVAL,
     TOP_K_RERANK,

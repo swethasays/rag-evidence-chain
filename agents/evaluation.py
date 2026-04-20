@@ -22,7 +22,6 @@ Flow:
         → return EvaluationResult
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -33,6 +32,7 @@ import uuid
 from dataclasses import dataclass, field
 
 import duckdb
+
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -214,7 +214,6 @@ def score_retrieval(
 
     if not reasoning_result.sentences:
         return 0.0
-
 
     # Load embedding model lazily — reuse if already loaded
     if embed_model is None:
@@ -674,12 +673,10 @@ if __name__ == "__main__":
     print(f"\n{'─' * 60}")
     print("STORED EVALUATIONS:")
     print(f"{'─' * 60}")
-    import duckdb as _duckdb
-    conn = _duckdb.connect("data/contracts.db")
-    print(conn.execute("""
-        SELECT question[:50], overall_score, passed, created_at
-        FROM evaluations
-        ORDER BY created_at DESC
-        LIMIT 5
-    """).fetchdf())
-    conn.close()
+    with duckdb.connect("data/contracts.db") as conn:
+        print(conn.execute("""
+            SELECT question[:50], overall_score, passed, created_at
+            FROM evaluations
+            ORDER BY created_at DESC
+            LIMIT 5
+        """).fetchdf())

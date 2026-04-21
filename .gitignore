@@ -219,9 +219,6 @@ __pycache__/
 dist/
 build/
 
-# Vector store index
-*.faiss
-*.index
 
 # Data
 *.csv

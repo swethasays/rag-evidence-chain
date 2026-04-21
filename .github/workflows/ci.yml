@@ -56,11 +56,3 @@ jobs:
       - name: Run tests
         run: |
           pytest tests/ -v --tb=short
-
-      # ── Upload test results ────────────────────────────
-      - name: Upload test results
-        uses: actions/upload-artifact@v4
-        if: always()   # upload even if tests fail
-        with:
-          name: test-results
-          path: .pytest_cache/

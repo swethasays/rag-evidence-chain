@@ -1,0 +1,66 @@
+# .github/workflows/ci.yml
+#
+# CI pipeline — runs on every push and pull request
+#
+# What it does:
+#   1. Sets up Python 3.11
+#   2. Installs dependencies
+#   3. Runs all 39 tests
+#   4. Reports pass/fail on GitHub
+
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout code ──────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Set up Python ──────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── Install dependencies ───────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements-docker.txt
+
+      # ── Create minimal test environment ───────────────
+      # Tests need a .env file with dummy values
+      # Real API keys not needed — tests use pure functions only
+      - name: Create test environment
+        run: |
+          cat > .env << 'EOF'
+          GROQ_API_KEY=test_key
+          LANGCHAIN_API_KEY=test_key
+          LANGCHAIN_PROJECT=rag-evidence-chain
+          REDIS_URL=redis://localhost:6379
+          EOF
+
+      # ── Run tests ──────────────────────────────────────
+      - name: Run tests
+        run: |
+          pytest tests/ -v --tb=short
+
+      # ── Upload test results ────────────────────────────
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()   # upload even if tests fail
+        with:
+          name: test-results
+          path: .pytest_cache/

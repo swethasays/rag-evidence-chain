@@ -4,7 +4,7 @@ emoji: 🐨
 colorFrom: gray
 colorTo: gray
 sdk: docker
-app_port: 8000
+app_port: 7860
 pinned: false
 license: mit
 short_description: Legal contract Q&A — every answer traced to its source.

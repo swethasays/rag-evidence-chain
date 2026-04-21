@@ -235,8 +235,6 @@ build/
 .DS_Store
 EOF
 # Project specific
-*.faiss
-*.index
 *.env
 .env
 .env

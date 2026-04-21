@@ -37,7 +37,8 @@ jobs:
           git config --global user.email "ci@github.com"
           git config --global user.name "GitHub Actions"
 
-          # Push to HuggingFace using token auth
+          # Add HuggingFace remote
           git remote add hf "https://swethasays:$HF_TOKEN@huggingface.co/spaces/swethasays/rag-evidence-chain.git"
-          git config credential.helper ""
+
+          # Push to HuggingFace — triggers automatic rebuild
           git push hf main --force

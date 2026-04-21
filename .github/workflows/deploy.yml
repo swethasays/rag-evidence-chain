@@ -37,9 +37,7 @@ jobs:
           git config --global user.email "ci@github.com"
           git config --global user.name "GitHub Actions"
 
-          # Add HuggingFace remote with token in header instead of URL
-          git remote add hf "https://huggingface.co/spaces/swethasays/rag-evidence-chain.git"
-          git config --global http.extraheader "AUTHORIZATION: Bearer $HF_TOKEN"
-
-          # Push to HuggingFace
+          # Push to HuggingFace using token auth
+          git remote add hf "https://swethasays:$HF_TOKEN@huggingface.co/spaces/swethasays/rag-evidence-chain.git"
+          git config credential.helper ""
           git push hf main --force

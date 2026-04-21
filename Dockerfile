@@ -45,10 +45,16 @@ RUN mkdir -p data/contracts
 # ── Port ──────────────────────────────────────────────────
 EXPOSE 8000
 
+# ── Ports ─────────────────────────────────────────────────
+EXPOSE 7860
+EXPOSE 8000
+
 # ── Health check ──────────────────────────────────────────
 # Docker checks this every 30s — restarts container if unhealthy
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:7860/_stcore/health || exit 1
 
 # ── Startup ───────────────────────────────────────────────
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "7860"]
+COPY start.sh .
+RUN chmod +x start.sh
+CMD ["./start.sh"]

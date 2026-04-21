@@ -128,7 +128,7 @@ async def root():
     """API information and available endpoints."""
     return {
         "name": "RAG Evidence Chain",
-        "description": "Legal contract Q&A — every answer traced to its source",
+        "description": "Legal contract Q&A - every answer traced to its source",
         "version": "1.0.0",
         "endpoints": {
             "health": "/health",

@@ -38,7 +38,7 @@ jobs:
           git config --global user.name "GitHub Actions"
 
           # Add HuggingFace remote
-          git remote add hf git remote add hf https://swethasays:${HF_TOKEN}@huggingface.co/spaces/swethasays/rag-evidence-chain.git
+          git remote add hf "https://swethasays:$HF_TOKEN@huggingface.co/spaces/swethasays/rag-evidence-chain.git"
 
           # Push to HuggingFace
           git push hf main --force

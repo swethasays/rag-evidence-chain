@@ -330,6 +330,37 @@ st.markdown("""
         margin-top: auto !important;
         display: flex !important;
         align-items: flex-end !important;}
+            
+    /* ── Selectbox search hint ── */
+    .stSelectbox [data-baseweb="select"] input::placeholder {
+        color: var(--text-faint) !important;
+    }
+    
+    /* Press enter to apply hint */
+    li[aria-selected="false"] {
+        color: var(--text-dim) !important;
+    }
+
+    /* Selectbox dropdown options */
+    [data-baseweb="menu"] {
+        background: var(--surface) !important;
+    }
+    
+    [data-baseweb="menu"] li {
+        color: var(--text-dim) !important;
+        background: var(--surface) !important;
+    }
+
+    [data-baseweb="menu"] li:hover {
+        background: var(--surface2) !important;
+        color: var(--text) !important;
+    }
+
+    /* "Press Enter to apply" hint text */
+    [data-baseweb="select"] [aria-live="polite"] {
+        color: var(--text-faint) !important;
+        opacity: 0.7 !important;
+    }
     
 </style>
 """, unsafe_allow_html=True)

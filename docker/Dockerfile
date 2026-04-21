@@ -42,6 +42,7 @@ COPY . .
 # In production this would be a mounted volume
 RUN mkdir -p data/contracts
 
+# ── Ports ─────────────────────────────────────────────────
 EXPOSE 7860
 EXPOSE 8000
 

@@ -123,6 +123,22 @@ async def health():
     return HealthResponse(status="ok")
 
 
+@app.get("/", tags=["System"])
+async def root():
+    """API information and available endpoints."""
+    return {
+        "name": "RAG Evidence Chain",
+        "description": "Legal contract Q&A — every answer traced to its source",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "contracts": "/contracts",
+            "ask": "/ask",
+            "docs": "/docs",
+        },
+    }
+
+
 @app.get("/contracts", response_model=ContractListResponse, tags=["Contracts"])
 async def list_contracts():
     """

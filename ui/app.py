@@ -167,10 +167,10 @@ st.markdown("""
         color: var(--text) !important;
     }
 
-    /* "Press Enter to apply" hint (Streamlit selectbox helper text) */
-    .stSelectbox + div > div {
-        color: #8b93a7 !important;  /* medium muted color */
-        font-size: 0.72rem !important;
+    /* "Press Enter to apply" hint — target all small helper texts */
+    small, .stSelectbox small, [data-testid="stSelectbox"] ~ small,
+    .stTextInput ~ small, [data-testid="InputInstructions"] {
+        color: #a0a8b8 !important;
         opacity: 1 !important;
     }
             

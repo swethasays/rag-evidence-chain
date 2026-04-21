@@ -144,6 +144,36 @@ st.markdown("""
         padding-bottom: 10px !important;
         line-height: 1.4 !important;
     }
+            
+    /* ── Selectbox dropdown ── */
+    [data-baseweb="select"] input {
+        color: var(--text) !important;
+        caret-color: var(--gold) !important;
+    }
+
+    /* Dropdown menu background */
+    [data-baseweb="popover"] {
+        background: var(--surface) !important;
+    }
+
+    /* Dropdown options */
+    [data-baseweb="menu"] ul li {
+        background: var(--surface) !important;
+        color: var(--text-dim) !important;
+    }
+
+    [data-baseweb="menu"] ul li:hover {
+        background: var(--surface2) !important;
+        color: var(--text) !important;
+    }
+
+    /* "Press Enter to apply" hint (Streamlit selectbox helper text) */
+    .stSelectbox + div > div {
+        color: #8b93a7 !important;  /* medium muted color */
+        font-size: 0.72rem !important;
+        opacity: 1 !important;
+    }
+            
 
     /* ── Form — remove default chrome ── */
     div[data-testid="stForm"] {
@@ -330,37 +360,6 @@ st.markdown("""
         margin-top: auto !important;
         display: flex !important;
         align-items: flex-end !important;}
-            
-    /* ── Selectbox search hint ── */
-    .stSelectbox [data-baseweb="select"] input::placeholder {
-        color: var(--text-faint) !important;
-    }
-    
-    /* Press enter to apply hint */
-    li[aria-selected="false"] {
-        color: var(--text-dim) !important;
-    }
-
-    /* Selectbox dropdown options */
-    [data-baseweb="menu"] {
-        background: var(--surface) !important;
-    }
-    
-    [data-baseweb="menu"] li {
-        color: var(--text-dim) !important;
-        background: var(--surface) !important;
-    }
-
-    [data-baseweb="menu"] li:hover {
-        background: var(--surface2) !important;
-        color: var(--text) !important;
-    }
-
-    /* "Press Enter to apply" hint text */
-    [data-baseweb="select"] [aria-live="polite"] {
-        color: var(--text-faint) !important;
-        opacity: 0.7 !important;
-    }
     
 </style>
 """, unsafe_allow_html=True)
@@ -519,11 +518,6 @@ st.markdown("""
 
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-st.markdown(
-    "<p style='color:#ffffff; font-size:0.75rem; font-family:IBM Plex Mono,monospace;'>"
-    "💡 510 contracts available — searchable dropdown coming after full ingestion</p>",
-    unsafe_allow_html=True,
-)
 
 # ---------------------------------------------------------------------------
 # Session state
@@ -549,7 +543,6 @@ col_contract, col_question = st.columns([1.4, 3.4])
 with col_contract:
     st.markdown('<div class="search-label">Contract</div>', unsafe_allow_html=True)
 
-    # Search box to filter contracts
     contract_search = st.text_input(
         "Search contracts",
         placeholder="Type to filter...",
@@ -557,16 +550,13 @@ with col_contract:
         key="contract_search",
     )
 
-    # Filter contracts based on search
-    if contract_search.strip():
-        filtered_opts = [
-            opt for opt in display_opts
-            if contract_search.lower() in opt.lower()
-        ]
-        if not filtered_opts:
-            filtered_opts = ["All contracts"]
-    else:
-        filtered_opts = display_opts
+    filtered_opts = [
+        opt for opt in display_opts
+        if contract_search.lower() in opt.lower()
+    ] if contract_search.strip() else display_opts
+
+    if not filtered_opts:
+        filtered_opts = ["All contracts"]
 
     selected_display = st.selectbox(
         "Contract",

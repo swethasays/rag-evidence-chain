@@ -1,3 +1,15 @@
+---
+title: Rag Evidence Chain
+emoji: 🐨
+colorFrom: gray
+colorTo: gray
+sdk: docker
+app_port: 8000
+pinned: false
+license: mit
+short_description: Legal contract Q&A — every answer traced to its source.
+---
+
 # 🔗 RAG Evidence Chain
 
 > Production agentic RAG system for legal contracts — every answer traced to its source with a live evidence chain.

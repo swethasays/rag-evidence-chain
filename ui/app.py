@@ -517,7 +517,31 @@ col_contract, col_question = st.columns([1.4, 3.4])
 
 with col_contract:
     st.markdown('<div class="search-label">Contract</div>', unsafe_allow_html=True)
-    selected_display = st.selectbox("Contract", display_opts, label_visibility="collapsed")
+
+    # Search box to filter contracts
+    contract_search = st.text_input(
+        "Search contracts",
+        placeholder="Type to filter...",
+        label_visibility="collapsed",
+        key="contract_search",
+    )
+
+    # Filter contracts based on search
+    if contract_search.strip():
+        filtered_opts = [
+            opt for opt in display_opts
+            if contract_search.lower() in opt.lower()
+        ]
+        if not filtered_opts:
+            filtered_opts = ["All contracts"]
+    else:
+        filtered_opts = display_opts
+
+    selected_display = st.selectbox(
+        "Contract",
+        filtered_opts,
+        label_visibility="collapsed",
+    )
     selected_contract = (
         display_to_raw.get(selected_display)
         if selected_display != "All contracts" else "All contracts"

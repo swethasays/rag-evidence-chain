@@ -1,0 +1,44 @@
+# .github/workflows/deploy.yml
+#
+# Deploy pipeline — runs on every push to main after CI passes
+#
+# What it does:
+#   1. Waits for CI tests to pass
+#   2. Pushes code to HuggingFace Spaces
+#   3. HuggingFace rebuilds and redeploys automatically
+
+name: Deploy
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    name: Deploy to HuggingFace Spaces
+    runs-on: ubuntu-latest
+
+    # Only deploy if CI passes first
+    needs: []
+
+    steps:
+      # ── Checkout code ──────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0   # full history needed for HF push
+          lfs: true
+
+      # ── Push to HuggingFace Spaces ─────────────────────
+      - name: Push to HuggingFace Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.email "ci@github.com"
+          git config --global user.name "GitHub Actions"
+
+          # Add HuggingFace remote
+          git remote add hf https://swethasays:${HF_TOKEN}@huggingface.co/spaces/swethasays/rag-evidence-chain
+
+          # Push to HuggingFace
+          git push hf main --force

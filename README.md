@@ -57,7 +57,7 @@ Streamlit UI          → answer + clickable evidence chain DAG
 
 | Layer | Tools |
 |---|---|
-| Data | CUAD, DuckDB, Unstructured.io, HuggingFace |
+| Data | CUAD, DuckDB, HuggingFace |
 | Agents | LangGraph, Groq, FAISS, BM25, Cross-encoder |
 | Cache | Redis |
 | Security | Pydantic, Rate limiting, dotenv |

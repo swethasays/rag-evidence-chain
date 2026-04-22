@@ -309,4 +309,4 @@ def run_ingestion(max_contracts: int = 50) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    run_ingestion(max_contracts=50)
+    run_ingestion(max_contracts=510)

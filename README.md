@@ -44,7 +44,7 @@ User Question
       ↓
 Agent 1: Retrieval    → finds top 5 relevant chunks (FAISS + BM25)
       ↓
-Agent 2: Reasoning    → forms answer + cites sources (Groq LLM)
+Agent 2: Reasoning    → forms answer + cites sources
       ↓
 Agent 3: Evaluation   → scores answer quality
       ↓
@@ -57,7 +57,7 @@ Streamlit UI          → answer + clickable evidence chain DAG
 
 | Layer | Tools |
 |---|---|
-| Data | CUAD, DuckDB, dbt, Unstructured.io, HuggingFace |
+| Data | CUAD, DuckDB, Unstructured.io, HuggingFace |
 | Agents | LangGraph, Groq, FAISS, BM25, Cross-encoder |
 | Cache | Redis |
 | Security | Pydantic, Rate limiting, dotenv |
@@ -114,22 +114,6 @@ The system measures:
 - Groq free tier has rate limits
 - CUAD is English only
 - Not a substitute for legal advice
-
----
-
-## 🗺️ Roadmap
-
-- [x] Project structure
-- [x] README
-- [x] Requirements
-- [x] Config
-- [ ] Data ingestion pipeline
-- [ ] Retrieval agent
-- [ ] Reasoning agent + evidence chain
-- [ ] Evaluation agent
-- [ ] FastAPI backend
-- [ ] Streamlit UI + DAG visualization
-- [ ] Docker + deployment
 
 ---
 

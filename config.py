@@ -64,6 +64,6 @@ RATE_LIMIT = "10/minute"
 # Weights for overall score calculation
 # Must sum to 1.0
 # Retrieval weighted highest — root cause of most RAG failures
-EVAL_WEIGHT_RETRIEVAL    = 0.4
-EVAL_WEIGHT_FAITHFULNESS = 0.4
-EVAL_WEIGHT_RELEVANCE    = 0.2
+EVAL_WEIGHT_RETRIEVAL    = 0
+EVAL_WEIGHT_FAITHFULNESS = 0.6
+EVAL_WEIGHT_RELEVANCE    = 0.4

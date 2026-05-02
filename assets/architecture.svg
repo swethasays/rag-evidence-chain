@@ -1,0 +1,194 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1060" font-family="'Segoe UI', system-ui, sans-serif">
+
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0,10 3.5,0 7" fill="#475569"/>
+    </marker>
+    <marker id="arr-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0,10 3.5,0 7" fill="#22c55e"/>
+    </marker>
+    <marker id="arr-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0,10 3.5,0 7" fill="#f59e0b"/>
+    </marker>
+    <marker id="arr-red" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0,10 3.5,0 7" fill="#ef4444"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="1060" fill="#0f1117" rx="14"/>
+
+  <!-- Title -->
+  <text x="400" y="38" text-anchor="middle" fill="#f1f5f9" font-size="18" font-weight="700">RAG Evidence Chain — System Architecture</text>
+  <text x="400" y="57" text-anchor="middle" fill="#475569" font-size="11">every answer traced to its source · CUAD legal contracts</text>
+
+  <!-- ── USER QUESTION ── y=72 h=44 -->
+  <rect x="270" y="72" width="260" height="44" rx="22" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="400" y="90" text-anchor="middle" fill="#93c5fd" font-size="13" font-weight="600">User Question</text>
+  <text x="400" y="108" text-anchor="middle" fill="#60a5fa" font-size="10">Streamlit UI  ·  POST /ask</text>
+
+  <!-- Arrow: UserQ → Agent1 -->
+  <line x1="400" y1="116" x2="400" y2="130" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ── AGENT 1: RETRIEVAL ── y=133 h=138 -->
+  <rect x="80" y="133" width="640" height="138" rx="10" fill="#0c2d48" stroke="#0ea5e9" stroke-width="1.5"/>
+  <rect x="80" y="133" width="640" height="30" rx="10" fill="#0ea5e9" opacity="0.25"/>
+  <rect x="80" y="150" width="640" height="13" fill="#0ea5e9" opacity="0.25"/>
+  <text x="110" y="153" fill="#38bdf8" font-size="12" font-weight="700">Agent 1 — Retrieval</text>
+  <text x="710" y="153" text-anchor="end" fill="#334155" font-size="10">~1–2 s</text>
+
+  <text x="180" y="183" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600">FAISS Dense Search</text>
+  <text x="180" y="199" text-anchor="middle" fill="#64748b" font-size="10">nv-embedqa-e5-v5 · 1024-dim</text>
+  <text x="180" y="214" text-anchor="middle" fill="#64748b" font-size="10">top-20 semantic results</text>
+
+  <line x1="275" y1="196" x2="305" y2="196" stroke="#0369a1" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <text x="400" y="183" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600">BM25 Keyword Search</text>
+  <text x="400" y="199" text-anchor="middle" fill="#64748b" font-size="10">sparse · exact term matching</text>
+  <text x="400" y="214" text-anchor="middle" fill="#64748b" font-size="10">top-20 keyword results</text>
+
+  <line x1="495" y1="196" x2="525" y2="196" stroke="#0369a1" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <text x="618" y="183" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600">CrossEncoder Rerank</text>
+  <text x="618" y="199" text-anchor="middle" fill="#64748b" font-size="10">merge + deduplicate</text>
+  <text x="618" y="214" text-anchor="middle" fill="#64748b" font-size="10">→ top 5 chunks</text>
+
+  <line x1="80" y1="168" x2="80" y2="225" stroke="#0ea5e9" stroke-width="0.5" opacity="0.3"/>
+  <line x1="305" y1="168" x2="305" y2="255" stroke="#0ea5e9" stroke-width="0.5" opacity="0.3" stroke-dasharray="3,3"/>
+  <line x1="525" y1="168" x2="525" y2="255" stroke="#0ea5e9" stroke-width="0.5" opacity="0.3" stroke-dasharray="3,3"/>
+
+  <text x="400" y="248" text-anchor="middle" fill="#475569" font-size="10" font-style="italic">80,259 chunks indexed from 510 CUAD contracts</text>
+
+  <!-- Arrow: Agent1 → Agent2 -->
+  <line x1="400" y1="271" x2="400" y2="285" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ── AGENT 2: REASONING ── y=288 h=120 -->
+  <rect x="80" y="288" width="640" height="120" rx="10" fill="#1a0a3d" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="80" y="288" width="640" height="30" rx="10" fill="#8b5cf6" opacity="0.25"/>
+  <rect x="80" y="305" width="640" height="13" fill="#8b5cf6" opacity="0.25"/>
+  <text x="110" y="308" fill="#c4b5fd" font-size="12" font-weight="700">Agent 2 — Reasoning</text>
+  <text x="710" y="308" text-anchor="end" fill="#334155" font-size="10">~9 s · Redis cached</text>
+
+  <text x="280" y="338" text-anchor="middle" fill="#ddd6fe" font-size="12" font-weight="600">LLaMA 3.3 70B  ·  NVIDIA NIM</text>
+  <text x="280" y="356" text-anchor="middle" fill="#64748b" font-size="10">Reads top-5 chunks · produces cited JSON answer</text>
+  <text x="280" y="372" text-anchor="middle" fill="#64748b" font-size="10">Every sentence linked to source chunk number</text>
+  <text x="280" y="390" text-anchor="middle" fill="#64748b" font-size="10">Returns: sentences · confidence · answer_found</text>
+
+  <!-- Redis cache box inside Agent 2 -->
+  <rect x="570" y="322" width="130" height="72" rx="8" fill="#0f0a2e" stroke="#4f46e5" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="635" y="342" text-anchor="middle" fill="#818cf8" font-size="10" font-weight="600">Redis Cache</text>
+  <text x="635" y="358" text-anchor="middle" fill="#475569" font-size="9">key: question+chunks</text>
+  <text x="635" y="373" text-anchor="middle" fill="#475569" font-size="9">TTL: 1 hour</text>
+  <text x="635" y="388" text-anchor="middle" fill="#4338ca" font-size="9">HIT → skip LLM</text>
+
+  <!-- Arrow: Agent2 → Agent3 -->
+  <line x1="400" y1="408" x2="400" y2="422" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ── AGENT 3: EVALUATION ── y=425 h=233 -->
+  <rect x="80" y="425" width="640" height="233" rx="10" fill="#052e16" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="80" y="425" width="640" height="30" rx="10" fill="#10b981" opacity="0.25"/>
+  <rect x="80" y="442" width="640" height="13" fill="#10b981" opacity="0.25"/>
+  <text x="110" y="445" fill="#6ee7b7" font-size="12" font-weight="700">Agent 3 — Evaluation</text>
+  <text x="710" y="445" text-anchor="end" fill="#334155" font-size="10">~8 s parallel · Redis cached</text>
+
+  <!-- Three score columns -->
+  <text x="180" y="476" text-anchor="middle" fill="#6ee7b7" font-size="11" font-weight="600">Retrieval Score</text>
+  <text x="180" y="492" text-anchor="middle" fill="#64748b" font-size="10">DuckDB ground truth</text>
+  <text x="180" y="507" text-anchor="middle" fill="#64748b" font-size="10">embedding similarity</text>
+  <text x="180" y="522" text-anchor="middle" fill="#64748b" font-size="10">0.5 if no ground truth</text>
+
+  <line x1="305" y1="455" x2="305" y2="558" stroke="#10b981" stroke-width="0.5" opacity="0.3" stroke-dasharray="3,3"/>
+
+  <text x="400" y="476" text-anchor="middle" fill="#6ee7b7" font-size="11" font-weight="600">Faithfulness Score</text>
+  <text x="400" y="492" text-anchor="middle" fill="#64748b" font-size="10">Gemma 3 4B judge</text>
+  <text x="400" y="507" text-anchor="middle" fill="#64748b" font-size="10">checks every sentence</text>
+  <text x="400" y="522" text-anchor="middle" fill="#64748b" font-size="10">vs source chunk</text>
+
+  <line x1="525" y1="455" x2="525" y2="558" stroke="#10b981" stroke-width="0.5" opacity="0.3" stroke-dasharray="3,3"/>
+
+  <text x="618" y="476" text-anchor="middle" fill="#6ee7b7" font-size="11" font-weight="600">Relevance Score</text>
+  <text x="618" y="492" text-anchor="middle" fill="#64748b" font-size="10">Gemma 3 4B judge</text>
+  <text x="618" y="507" text-anchor="middle" fill="#64748b" font-size="10">answer addresses</text>
+  <text x="618" y="522" text-anchor="middle" fill="#64748b" font-size="10">the question?</text>
+
+  <!-- Parallel label -->
+  <line x1="340" y1="538" x2="680" y2="538" stroke="#059669" stroke-width="1" stroke-dasharray="3,2" opacity="0.6"/>
+  <text x="510" y="552" text-anchor="middle" fill="#059669" font-size="9">faithfulness + relevance run in parallel</text>
+
+  <!-- DuckDB box inside Agent 3 (Retrieval Score column) -->
+  <rect x="95" y="562" width="166" height="62" rx="8" fill="#0a1628" stroke="#0369a1" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="178" y="581" text-anchor="middle" fill="#38bdf8" font-size="10" font-weight="600">DuckDB</text>
+  <text x="178" y="597" text-anchor="middle" fill="#475569" font-size="9">ground truth store</text>
+  <text x="178" y="612" text-anchor="middle" fill="#475569" font-size="9">510 contract answer labels</text>
+
+  <!-- Redis cache box inside Agent 3 (right side, mirrors Agent 2) -->
+  <rect x="570" y="562" width="130" height="62" rx="8" fill="#0f0a2e" stroke="#4f46e5" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="635" y="581" text-anchor="middle" fill="#818cf8" font-size="10" font-weight="600">Redis Cache</text>
+  <text x="635" y="597" text-anchor="middle" fill="#475569" font-size="9">key: question+raw_answer</text>
+  <text x="635" y="612" text-anchor="middle" fill="#4338ca" font-size="9">HIT → skip all judges</text>
+
+  <!-- Arrow: Agent3 → Router -->
+  <line x1="400" y1="658" x2="400" y2="672" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ── LANGGRAPH ROUTER ── y=675 h=56 -->
+  <rect x="258" y="675" width="284" height="56" rx="10" fill="#1c1400" stroke="#f59e0b" stroke-width="2"/>
+  <text x="400" y="697" text-anchor="middle" fill="#fcd34d" font-size="13" font-weight="700">LangGraph Router</text>
+  <text x="400" y="717" text-anchor="middle" fill="#78716c" font-size="10">overall score · retrieval score · retry count</text>
+
+  <!-- ── PASS arrow: Router bottom → Answer ── -->
+  <line x1="400" y1="731" x2="400" y2="775" stroke="#22c55e" stroke-width="2" marker-end="url(#arr-green)"/>
+  <text x="414" y="758" fill="#22c55e" font-size="10" font-weight="600">PASS ≥ 0.50</text>
+
+  <!-- ── ANSWER ── y=778 h=82 -->
+  <rect x="190" y="778" width="420" height="82" rx="10" fill="#0a1f0a" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="400" y="801" text-anchor="middle" fill="#86efac" font-size="13" font-weight="700">Answer + Evidence Chain</text>
+  <text x="400" y="820" text-anchor="middle" fill="#64748b" font-size="10">cited sentences · source chunks · contract titles</text>
+  <text x="400" y="836" text-anchor="middle" fill="#64748b" font-size="10">faithfulness · relevance · overall score</text>
+  <text x="400" y="851" text-anchor="middle" fill="#374151" font-size="10">Streamlit UI  ·  FastAPI /ask response</text>
+
+  <!-- ── RETRY arrow: Router left → Agent1 left ── -->
+  <!-- From router left (258, 703) → far left (45, 703) → up (45, 202) → Agent1 left (80, 202) -->
+  <polyline points="258,703 45,703 45,202 80,202" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arr-amber)"/>
+  <text x="22" y="453" text-anchor="middle" fill="#f59e0b" font-size="10" font-weight="600" transform="rotate(-90,22,453)">RETRY  retrieval &lt; 0.05  ·  max 2×</text>
+
+  <!-- ── HUMAN REVIEW arrow: Router right → HR box ── -->
+  <!-- From router right (542, 703) → right (660, 703) → down (660, 775) -->
+  <polyline points="542,703 660,703 660,775" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arr-red)"/>
+  <text x="595" y="695" text-anchor="middle" fill="#ef4444" font-size="10" font-weight="600">LOW CONFIDENCE</text>
+
+  <!-- ── HUMAN REVIEW box ── y=778 -->
+  <rect x="610" y="778" width="160" height="58" rx="10" fill="#1f0505" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="690" y="801" text-anchor="middle" fill="#fca5a5" font-size="12" font-weight="700">⚠ Human Review</text>
+  <text x="690" y="818" text-anchor="middle" fill="#64748b" font-size="10">answer flagged</text>
+  <text x="690" y="832" text-anchor="middle" fill="#64748b" font-size="10">overall &lt; 0.50</text>
+
+  <!-- ── LANGSMITH TRACING ── y=868 h=52 -->
+  <!-- Trace arrow: from pipeline bottom (400, 860) down to LangSmith box -->
+  <line x1="400" y1="860" x2="400" y2="865" stroke="#0d9488" stroke-width="1.5" stroke-dasharray="3,2" marker-end="url(#arr)"/>
+  <rect x="80" y="868" width="640" height="52" rx="8" fill="#011c1c" stroke="#0d9488" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="110" y="888" fill="#5eead4" font-size="12" font-weight="700">LangSmith Tracing</text>
+  <text x="710" y="888" text-anchor="end" fill="#334155" font-size="10">optional · free tier</text>
+  <text x="400" y="906" text-anchor="middle" fill="#475569" font-size="10">auto-traces every LangGraph node · per-agent latency · token counts · eval scores per run · set LANGCHAIN_API_KEY to enable</text>
+
+  <!-- ── LEGEND ── -->
+  <rect x="80" y="940" width="640" height="92" rx="8" fill="#111827" stroke="#1f2937" stroke-width="1"/>
+  <text x="400" y="960" text-anchor="middle" fill="#475569" font-size="10" font-weight="600" letter-spacing="1">PERFORMANCE</text>
+  <line x1="80" y1="967" x2="720" y2="967" stroke="#1f2937" stroke-width="1"/>
+
+  <text x="145" y="988" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Cold query</text>
+  <text x="145" y="1004" text-anchor="middle" fill="#f59e0b" font-size="14" font-weight="700">~20 s</text>
+  <text x="145" y="1020" text-anchor="middle" fill="#475569" font-size="9">retrieval + LLM + judges</text>
+
+  <line x1="270" y1="975" x2="270" y2="1025" stroke="#1f2937" stroke-width="1"/>
+
+  <text x="355" y="988" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Repeat query</text>
+  <text x="355" y="1004" text-anchor="middle" fill="#22c55e" font-size="14" font-weight="700">~0.4 s</text>
+  <text x="355" y="1020" text-anchor="middle" fill="#475569" font-size="9">reasoning + eval cache hit</text>
+
+  <line x1="480" y1="975" x2="480" y2="1025" stroke="#1f2937" stroke-width="1"/>
+
+  <text x="600" y="988" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Corpus size</text>
+  <text x="600" y="1004" text-anchor="middle" fill="#38bdf8" font-size="14" font-weight="700">80,259</text>
+  <text x="600" y="1020" text-anchor="middle" fill="#475569" font-size="9">chunks from 510 contracts</text>
+
+</svg>

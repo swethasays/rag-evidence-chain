@@ -17,22 +17,13 @@ import hashlib
 
 import duckdb
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import CHUNK_OVERLAP, CHUNK_SIZE, LOCAL_DATA_PATH, DB_PATH
+from config import DB_PATH, LOCAL_DATA_PATH, STORAGE_TYPE
+from data.chunker import Chunker
+from observability.logging import get_logger
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -119,64 +110,37 @@ def load_cuad(path: str = CUAD_PATH) -> dict:
     return data
 
 
+# Module-level Chunker instance — created once, reused for all contracts
+_chunker = Chunker()
+
+
 # ---------------------------------------------------------------------------
-# Chunking
+# Storage backend factory
 # ---------------------------------------------------------------------------
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[dict]:
+def get_storage():
     """
-    Split contract text into overlapping chunks using recursive
-    character splitting — preserves paragraph and sentence boundaries
-    wherever possible before falling back to smaller units.
+    Return the configured storage backend for raw contract text.
 
-    Args:
-        text:       Full contract text
-        chunk_size: Target size in characters per chunk
-        overlap:    Shared characters between consecutive chunks
-
-    Returns:
-        List of dicts: {text, char_start, char_end}
+    Backend is selected by STORAGE_TYPE in config.py:
+        "local"  → files under LOCAL_DATA_PATH  (default, no credentials needed)
+        "gcp"    → Google Cloud Storage bucket  (requires GCP_BUCKET_NAME + credentials)
+        "s3"     → AWS S3 bucket                (requires AWS_BUCKET_NAME + credentials)
     """
-
-    # Try to split on natural boundaries first
-    # Falls back to smaller units if chunk is still too big
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=overlap,
-        separators=["\n\n", "\n", ". ", " ", ""]
-    )
-
-    # LangChain gives us strings — we need to add position metadata
-    raw_chunks = splitter.split_text(text)
-
-    chunks = []
-    search_start = 0
-
-    for raw in raw_chunks:
-        # Find where this chunk starts in the original text
-        char_start = text.find(raw[:50], search_start)
-
-        # Guard — if chunk text not found, fall back to search_start
-        if char_start == -1:
-            logger.warning(
-                "Could not locate chunk in original text — "
-                "using search_start as fallback. Chunk: '%s...'",
-                raw[:40],
-            )
-            char_start = search_start
-
-        char_end = char_start + len(raw)
-
-        chunks.append({
-            "text": raw,
-            "char_start": char_start,
-            "char_end": char_end,
-        })
-
-        # Move search forward to avoid matching earlier occurrences
-        search_start = max(0, char_start - overlap)
-
-    return chunks
+    if STORAGE_TYPE == "local":
+        from data.storage.local import LocalStorage
+        return LocalStorage()
+    elif STORAGE_TYPE == "gcp":
+        from data.storage.gcp import GCPStorage
+        return GCPStorage()
+    elif STORAGE_TYPE == "s3":
+        from data.storage.s3 import S3Storage
+        return S3Storage()
+    else:
+        raise ValueError(
+            f"Unknown STORAGE_TYPE: '{STORAGE_TYPE}'. "
+            "Set to 'local', 'gcp', or 's3' in config.py."
+        )
 
 # ---------------------------------------------------------------------------
 # Storage helpers
@@ -254,6 +218,7 @@ def run_ingestion(max_contracts: int = 50) -> tuple[int, int]:
     """
     os.makedirs(LOCAL_DATA_PATH, exist_ok=True)
 
+    storage = get_storage()
     conn = setup_database()
     contracts_processed = 0
     total_chunks = 0
@@ -266,9 +231,13 @@ def run_ingestion(max_contracts: int = 50) -> tuple[int, int]:
             full_text = " ".join(p["context"] for p in contract["paragraphs"])
             contract_id = hashlib.sha256(full_text.encode()).hexdigest()
 
+            # Persist raw text to the configured storage backend
+            # (local files, GCS, or S3 depending on STORAGE_TYPE)
+            storage.save(contract_id, full_text)
+
             store_contract(conn, contract_id, title, full_text)
 
-            chunks = chunk_text(full_text)
+            chunks = _chunker.chunk(full_text)
             store_chunks(conn, contract_id, chunks)
             total_chunks += len(chunks)
 

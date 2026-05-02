@@ -3,7 +3,7 @@ agents/reasoning.py
 
 Agent 2 — Reasoning
 
-Takes the top-k chunks from Agent 1 and uses a Groq LLM to form
+Takes the top-k chunks from Agent 1 and uses the NVIDIA LLM to form
 a complete, cited answer. Every sentence in the answer is linked
 back to the exact chunk it came from — this is the evidence chain.
 
@@ -13,7 +13,7 @@ are generated at the same time as the answer, not matched after.
 Flow:
     chunks (from Agent 1)
         → build prompt with numbered chunks
-        → call Groq LLM (with retry on failure)
+        → call NVIDIA LLM (with retry on failure)
         → extract JSON robustly
         → parse structured JSON response
         → return answer + evidence chain
@@ -35,15 +35,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     CACHE_TTL,
-    GROQ_API_KEY,
     LLM_MAX_TOKENS,
     LLM_MODEL,
     LLM_TEMPERATURE,
     MIN_CONFIDENCE_SCORE,
+    NVIDIA_API_BASE,
+    NVIDIA_API_KEY,
     REDIS_URL,
 )
 
-from groq import Groq, BadRequestError, AuthenticationError
+from openai import OpenAI, BadRequestError, AuthenticationError
 from tenacity import (
     retry,
     retry_if_not_exception_type,
@@ -52,16 +53,9 @@ from tenacity import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+from observability.logging import get_logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Prompt version — increment when build_prompt() changes
@@ -73,39 +67,39 @@ logger = logging.getLogger(__name__)
 PROMPT_VERSION = "v1.0"
 
 # ---------------------------------------------------------------------------
-# Groq client — lazy singleton
+# NVIDIA LLM client — lazy singleton
 # ---------------------------------------------------------------------------
 
 # Not created at module load — that would crash before API key validation.
-# Created on first call to call_groq() and reused after that.
-_groq_client: Groq | None = None
+# Created on first call to call_llm() and reused after that.
+_llm_client: OpenAI | None = None
 
 
-def get_groq_client() -> Groq:
+def get_llm_client() -> OpenAI:
     """
-    Return the Groq client, creating it on first call.
+    Return the NVIDIA LLM client, creating it on first call.
 
     Lazy initialization means the module loads safely even if
-    GROQ_API_KEY is not set yet. The error surfaces at call time
+    NVIDIA_API_KEY is not set yet. The error surfaces at call time
     with a clear message, not at import time with a cryptic crash.
 
     Returns:
-        Shared Groq client instance
+        Shared OpenAI client pointed at NVIDIA's API
 
     Raises:
-        ValueError: If GROQ_API_KEY is not set
+        ValueError: If NVIDIA_API_KEY is not set
     """
-    global _groq_client
+    global _llm_client
 
-    if _groq_client is None:
-        if not GROQ_API_KEY:
+    if _llm_client is None:
+        if not NVIDIA_API_KEY:
             raise ValueError(
-                "GROQ_API_KEY is not set. "
+                "NVIDIA_API_KEY is not set. "
                 "Add it to your .env file."
             )
-        _groq_client = Groq(api_key=GROQ_API_KEY)
+        _llm_client = OpenAI(base_url=NVIDIA_API_BASE, api_key=NVIDIA_API_KEY)
 
-    return _groq_client
+    return _llm_client
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +107,19 @@ def get_groq_client() -> Groq:
 # ---------------------------------------------------------------------------
 
 # Not created at module load — created on first cache access.
-# Same pattern as Groq client — one connection, reused everywhere.
+# Same singleton pattern as the LLM client — one connection, reused everywhere.
 _redis_client: redis.Redis | None = None
+_redis_failure_time: float | None = None
+_REDIS_RETRY_AFTER = 30.0  # seconds to wait after a failure before retrying
 
 
 def get_redis_client() -> redis.Redis | None:
     """
     Return the Redis client, creating and verifying it on first call.
 
-    If Redis is unavailable, returns None instead of a broken client.
-    On every call where client is None, retries the connection —
-    so if Redis comes back online, the system reconnects automatically.
+    Implements a simple circuit breaker: after a failed connection, waits
+    _REDIS_RETRY_AFTER seconds before retrying — prevents hammering a
+    down Redis instance on every request.
 
     Returns:
         Redis client if connected, None if unavailable
@@ -131,32 +127,49 @@ def get_redis_client() -> redis.Redis | None:
     Note:
         Callers must handle None — cache is disabled when Redis is down.
     """
-    global _redis_client
+    global _redis_client, _redis_failure_time
 
-    # If we have a working client, return it
     if _redis_client is not None:
         return _redis_client
 
+    # Circuit breaker: don't retry within the backoff window
+    if _redis_failure_time is not None:
+        if time.monotonic() - _redis_failure_time < _REDIS_RETRY_AFTER:
+            return None
+
     # Try to connect and verify
     try:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(REDIS_URL)
+        if parsed.hostname not in ("localhost", "127.0.0.1") and not parsed.password:
+            logger.warning(
+                "REDIS_URL points to non-local host '%s' without a password. "
+                "Set redis://:password@host:port for production.",
+                parsed.hostname,
+            )
         client = redis.from_url(REDIS_URL)
         client.ping()
         _redis_client = client
+        _redis_failure_time = None
         logger.info("Redis connection established at %s", REDIS_URL)
         return _redis_client
     except redis.RedisError as e:
-        # Don't store broken client — next call will retry
+        _redis_failure_time = time.monotonic()
         logger.warning(
-            "Redis unavailable at %s — caching disabled: %s",
-            REDIS_URL, e,
+            "Redis unavailable at %s — caching disabled for %ds: %s",
+            REDIS_URL, _REDIS_RETRY_AFTER, e,
         )
         return None
 
 
 def reset_redis_client() -> None:
-    """Reset the Redis client so next call to get_redis_client() retries."""
-    global _redis_client
+    """
+    Reset the Redis client so next call to get_redis_client() retries
+    after the circuit-breaker backoff window.
+    """
+    global _redis_client, _redis_failure_time
     _redis_client = None
+    _redis_failure_time = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +381,9 @@ def _get_cache_key(question: str, chunk_ids: list[str]) -> str:
     Returns:
         SHA256 hex string safe for use as a Redis key
     """
-    # Sort chunk_ids for consistency — order shouldn't affect cache hit
-    content = f"{PROMPT_VERSION}:{question}:{'|'.join(sorted(chunk_ids))}"
+    # Preserve chunk order — build_prompt() numbers chunks by position, so
+    # different orderings produce different prompts and different answers.
+    content = f"{PROMPT_VERSION}:{question}:{'|'.join(chunk_ids)}"
     return f"reasoning:{hashlib.sha256(content.encode()).hexdigest()}"
 
 # ---------------------------------------------------------------------------
@@ -454,7 +468,7 @@ class TokenBucket:
     """
     Simple token bucket rate limiter for LLM API calls.
 
-    Limits how many Groq calls happen per second across all threads.
+    Limits how many LLM API calls happen per second across all threads.
     When the bucket is empty, calls wait until tokens refill —
     preventing rate limit errors under concurrent load.
 
@@ -483,8 +497,9 @@ class TokenBucket:
                 if self._tokens >= 1:
                     self._tokens -= 1
                     return
-            # Bucket empty — wait briefly before retrying
-            time.sleep(0.1)
+                # Calculate exact time until next token rather than busy-waiting
+                wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
 
     def _refill(self) -> None:
         """Add tokens proportional to elapsed time since last refill."""
@@ -510,14 +525,14 @@ _rate_limiter = TokenBucket(rate=2.0, capacity=5.0)
     # Never retry permanent errors — only transient ones
     retry=retry_if_not_exception_type((BadRequestError, AuthenticationError)),
     before_sleep=lambda retry_state: logger.warning(
-        "Groq API call failed. Retrying attempt %d/3...",
+        "LLM API call failed. Retrying attempt %d/3...",
         retry_state.attempt_number,
     ),
 )
 
-def call_groq(prompt: str, model: str = LLM_MODEL) -> str:
+def call_llm(prompt: str, model: str = LLM_MODEL) -> str:
     """
-    Send a prompt to Groq and return the raw response text.
+    Send a prompt to NVIDIA's LLM API and return the raw response text.
 
     Uses a module-level client created once at startup — not on
     every call. Retries up to 3 times on transient errors only.
@@ -525,7 +540,7 @@ def call_groq(prompt: str, model: str = LLM_MODEL) -> str:
 
     Args:
         prompt: The complete prompt string
-        model:  Groq model name from config
+        model:  NVIDIA model ID from config
 
     Returns:
         Raw response string from the LLM
@@ -538,9 +553,9 @@ def call_groq(prompt: str, model: str = LLM_MODEL) -> str:
     # Acquire rate limit token before calling API
     _rate_limiter.acquire()
 
-    logger.info("Calling Groq LLM (model=%s)...", model)
+    logger.info("Calling NVIDIA LLM (model=%s)...", model)
 
-    response = get_groq_client().chat.completions.create(
+    response = get_llm_client().chat.completions.create(
         model=model,
         messages=[
             {
@@ -556,20 +571,15 @@ def call_groq(prompt: str, model: str = LLM_MODEL) -> str:
                 "content": prompt
             }
         ],
-        # Low temperature = deterministic, consistent JSON output
-        # High temperature would risk creative but malformed responses
         temperature=LLM_TEMPERATURE,
-        # Enough for a detailed cited answer
-        # In production, monitor for truncation and increase if needed
         max_tokens=LLM_MAX_TOKENS,
     )
 
     raw = response.choices[0].message.content
 
-    # Log token usage — every token costs money in production
     usage = response.usage
     logger.info(
-        "Groq token usage — prompt: %d, completion: %d, total: %d",
+        "NVIDIA token usage — prompt: %d, completion: %d, total: %d",
         usage.prompt_tokens,
         usage.completion_tokens,
         usage.total_tokens,
@@ -598,7 +608,7 @@ def parse_response(
         - Empty chunks list      → guards at top
 
     Args:
-        raw:      Raw string from Groq
+        raw:      Raw string from the LLM
         question: Original question
         chunks:   Chunks passed to the LLM (used to resolve citations)
 
@@ -659,10 +669,16 @@ def parse_response(
     chunks_used_set = set() # set for O(1) deduplication check
 
     for s in data.get("sentences", []):
-        chunk_num = s.get("chunk_number", 1)
+        chunk_num = s.get("chunk_number")
+        if chunk_num is None:
+            logger.warning(
+                "Sentence missing chunk_number field — skipping: '%s'",
+                s.get("text", "")[:60],
+            )
+            continue
 
-        # Resolve chunk — skip sentence if LLM hallucinated chunk number 
-        chunk, hallucinated = resolve_chunk(chunk_num, chunk_map, question) 
+        # Resolve chunk — skip sentence if LLM hallucinated chunk number
+        chunk, hallucinated = resolve_chunk(chunk_num, chunk_map, question)
         if hallucinated:
             continue
 
@@ -675,7 +691,7 @@ def parse_response(
         cited_sentences.append(CitedSentence(
             text=sentence_text,
             chunk_id=chunk["id"],
-            contract_title=chunk["contract_title"],
+            contract_title=chunk["contract_title"] or "Unknown Contract",
             chunk_text=chunk["text"],
             # Clamp to [0.0, 1.0] — LLM might return out-of-range values
             confidence=clamp(s.get("confidence", 0.5), 0.0, 1.0),
@@ -689,13 +705,17 @@ def parse_response(
     # Build plain text answer by joining all sentences
     raw_answer = " ".join(s.text for s in cited_sentences)
 
+    # If every sentence was filtered out (invalid chunk refs, empty text),
+    # treat this as no answer regardless of what the LLM reported
+    answer_found = data.get("answer_found", False) and len(cited_sentences) > 0
+
     return ReasoningResult(
         question=question,
         sentences=cited_sentences,
         overall_confidence=clamp(
             data.get("overall_confidence", 0.0), 0.0, 1.0
         ),
-        answer_found=data.get("answer_found", False),
+        answer_found=answer_found,
         raw_answer=raw_answer,
         chunks_used=chunks_used,
     )
@@ -709,8 +729,8 @@ class ReasoningAgent:
     """
     Agent 2 — reads retrieved chunks and forms a cited answer.
 
-    Takes the top-k chunks from Agent 1, sends them to Groq with
-    a structured prompt, and parses the response into a ReasoningResult
+    Takes the top-k chunks from Agent 1, sends them to the NVIDIA LLM
+    with a structured prompt, and parses the response into a ReasoningResult
     where every sentence is linked to its source chunk.
 
     Usage:
@@ -720,7 +740,7 @@ class ReasoningAgent:
 
     def __init__(self):
         logger.info("Initialising ReasoningAgent...")
-        # API key validated lazily on first call to call_groq()
+        # API key validated lazily on first call to call_llm()
         logger.info("ReasoningAgent ready.")
         
 
@@ -734,7 +754,7 @@ class ReasoningAgent:
 
         Pipeline:
             1. Build prompt with numbered chunks
-            2. Call Groq LLM (retries on failure)
+            2. Call NVIDIA LLM (retries on failure)
             3. Extract JSON robustly
             4. Parse into ReasoningResult with cited sentences
             5. Flag low confidence answers for human review
@@ -769,14 +789,14 @@ class ReasoningAgent:
         cache_key = _get_cache_key(question, [c["id"] for c in chunks])
         cached = self._cache_get(cache_key)
         if cached:
-            logger.info("Cache HIT — returning cached answer instantly.")
+            logger.info("Reasoning cache HIT for '%s' — skipping LLM.", question[:60])
             return cached
 
         # Build the prompt with numbered chunks
         prompt = build_prompt(question, chunks)
 
         # Call the LLM — retries automatically on transient failures
-        raw = call_groq(prompt)
+        raw = call_llm(prompt)
 
         # Parse into structured result with citations
         result = parse_response(raw, question, chunks)
@@ -815,7 +835,6 @@ class ReasoningAgent:
         try:
             data = r.get(key)
             if data:
-                logger.info("Cache HIT for key: %s...", key[:20])
                 return self._deserialize(data)
         except redis.RedisError as e:
             # Connection dropped mid-session — reset so next call retries

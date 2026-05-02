@@ -1,35 +1,39 @@
 # Data
-datasets
-duckdb
-dbt-core
-unstructured
+datasets>=2.14.0
+duckdb>=0.9.0
+langchain-text-splitters>=0.0.1
+
+# Storage backends — install whichever you use
+# google-cloud-storage  (for GCPStorage)
+# boto3                 (for S3Storage)
 
 # Embeddings & Vector Store
-faiss-cpu
-sentence-transformers
-rank-bm25
-pinecone-client
+faiss-cpu>=1.7.4
+sentence-transformers>=2.2.2  # required for CrossEncoder reranker
+rank-bm25>=0.2.2
+pinecone-client>=3.0.0
 
 # Agents
-langgraph
-langchain
-langsmith
-groq
+langgraph>=0.1.0
+langchain>=0.2.0
+langsmith>=0.1.0
+openai>=1.0.0
 
 # Backend
-fastapi
-uvicorn
-pydantic
-python-dotenv
-tenacity
-redis
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+tenacity>=8.2.0
+redis>=5.0.0
+slowapi>=0.1.9
 
 # Observability
-wandb
+wandb>=0.16.0
 
 # Frontend
-streamlit
-plotly
+streamlit>=1.28.0
+plotly>=5.17.0
 
 # Testing
-pytest
+pytest>=7.4.0

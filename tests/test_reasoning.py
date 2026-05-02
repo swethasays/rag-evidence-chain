@@ -23,6 +23,7 @@ from agents.reasoning import (
     resolve_chunk,
     clean_title,
     _get_cache_key,
+    parse_response,
 )
 
 
@@ -114,6 +115,38 @@ class TestCleanTitle:
         assert result == "Simple Agreement"
 
 
+class TestParseResponse:
+
+    def _make_chunks(self):
+        return [{"id": "chunk_1", "contract_title": "Contract A", "text": "The agreement terminates with 30 days notice."}]
+
+    def test_all_sentences_filtered_forces_answer_found_false(self):
+        # LLM claims answer_found=True but references a hallucinated chunk number
+        raw = """{
+            "answer_found": true,
+            "overall_confidence": 0.9,
+            "sentences": [
+                {"text": "Some claim.", "chunk_number": 99, "confidence": 0.9}
+            ]
+        }"""
+        result = parse_response(raw, "What is the termination clause?", self._make_chunks())
+        assert result.answer_found is False
+        assert result.sentences == []
+        assert result.raw_answer == ""
+
+    def test_valid_sentence_sets_answer_found_true(self):
+        raw = """{
+            "answer_found": true,
+            "overall_confidence": 0.9,
+            "sentences": [
+                {"text": "Terminates with 30 days notice.", "chunk_number": 1, "confidence": 0.9}
+            ]
+        }"""
+        result = parse_response(raw, "What is the termination clause?", self._make_chunks())
+        assert result.answer_found is True
+        assert len(result.sentences) == 1
+
+
 class TestGetCacheKey:
 
     def test_same_inputs_same_key(self):
@@ -126,11 +159,12 @@ class TestGetCacheKey:
         key2 = _get_cache_key("question 2", ["id1"])
         assert key1 != key2
 
-    def test_chunk_order_doesnt_matter(self):
-        # Sorted internally — order shouldn't affect cache hit
+    def test_chunk_order_matters(self):
+        # build_prompt() numbers chunks by position — different orderings
+        # produce different prompts and different citation numbers.
         key1 = _get_cache_key("question", ["id1", "id2"])
         key2 = _get_cache_key("question", ["id2", "id1"])
-        assert key1 == key2
+        assert key1 != key2
 
     def test_key_has_prefix(self):
         key = _get_cache_key("question", ["id1"])

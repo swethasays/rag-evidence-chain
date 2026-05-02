@@ -23,7 +23,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from contextlib import asynccontextmanager
 
 import duckdb
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.models import (
@@ -36,11 +37,35 @@ from api.models import (
 )
 from api.middleware import add_middleware
 from agents.graph import RAGPipeline
-from config import DB_PATH
+from config import API_KEY, DB_PATH, HUMAN_REVIEW_FLAG
 from observability.logging import get_logger
 from observability.tracing import setup_tracing
 
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(key: str = Security(_api_key_header)) -> None:
+    """
+    Require X-API-Key header when API_KEY env var is set.
+
+    In local dev (API_KEY not set) this is a no-op so you can call
+    the API without a key. In production, set API_KEY and every
+    protected endpoint will reject requests that omit or wrong the key.
+    """
+    if API_KEY is None:
+        return  # dev mode — no key configured, skip check
+    if key != API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key. Pass it as X-API-Key header.",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Pipeline — loaded once at startup
@@ -139,7 +164,8 @@ async def root():
     }
 
 
-@app.get("/contracts", response_model=ContractListResponse, tags=["Contracts"])
+@app.get("/contracts", response_model=ContractListResponse, tags=["Contracts"],
+         dependencies=[Depends(verify_api_key)])
 async def list_contracts():
     """
     List all available contracts.
@@ -159,7 +185,8 @@ async def list_contracts():
         raise HTTPException(status_code=500, detail="Failed to retrieve contracts.")
 
 
-@app.post("/ask", response_model=PipelineResponse, tags=["Pipeline"])
+@app.post("/ask", response_model=PipelineResponse, tags=["Pipeline"],
+          dependencies=[Depends(verify_api_key)])
 async def ask(request: QuestionRequest):
     """
     Run the full RAG pipeline for a question.
@@ -194,10 +221,7 @@ async def ask(request: QuestionRequest):
     # Build response
     # Strip UI-specific human review text — API consumers use
     # needs_human_review field instead of embedded text
-    clean_answer = result["answer"].replace(
-        "\n\n[⚠️ This answer has been flagged for human review due to low confidence scores.]",
-        ""
-    ).strip()
+    clean_answer = result["answer"].replace(f"\n\n{HUMAN_REVIEW_FLAG}", "").strip()
 
     # Build response
     return PipelineResponse(

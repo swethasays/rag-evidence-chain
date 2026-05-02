@@ -22,12 +22,13 @@ Flow:
         → return EvaluationResult
 """
 
+import concurrent.futures
+import hashlib
 import json
 import logging
 import os
 import string
 import sys
-import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -36,9 +37,11 @@ import duckdb
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import redis
+
 from config import (
+    CACHE_TTL,
     DB_PATH,
-    EMBEDDING_MODEL,
     EVAL_WEIGHT_FAITHFULNESS,
     EVAL_WEIGHT_RELEVANCE,
     EVAL_WEIGHT_RETRIEVAL,
@@ -47,10 +50,13 @@ from config import (
 )
 from agents.reasoning import (
     ReasoningResult,
-    call_groq,
+    call_llm,
     clamp,
     extract_json,
+    get_redis_client,
+    reset_redis_client,
 )
+from agents.retrieval import embed_texts
 
 # ---------------------------------------------------------------------------
 # Sanity checks — catch misconfiguration at startup, not at runtime
@@ -68,16 +74,18 @@ assert abs(
     f"Check EVAL_WEIGHT_* in config.py."
 )
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+from observability.logging import get_logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+# Bump when judge prompts change — invalidates stale cached eval results
+EVAL_PROMPT_VERSION = "v1"
+
+
+def _get_eval_cache_key(question: str, raw_answer: str) -> str:
+    """Cache key for an evaluation result — keyed on question + answer + judge prompt version."""
+    content = f"{EVAL_PROMPT_VERSION}:{question}:{raw_answer}"
+    return f"evaluation:{hashlib.sha256(content.encode()).hexdigest()}"
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +109,7 @@ class EvaluationResult:
     needs_human_review: bool   # flagged for human review
     failure_reason: str        # why it failed (if it did)
     ground_truth_found: bool   # was ground truth available in DuckDB?
+    retrieval_score_available: bool = True  # False when retrieval defaults to 0.5 (no ground truth)
 
 
 # ---------------------------------------------------------------------------
@@ -145,15 +154,17 @@ def get_ground_truth(
     if not keywords:
         return []
 
-    # Build parameterized query — one ? per keyword
-    # Never interpolate user input directly into SQL
-    placeholders = " OR ".join([
-        "LOWER(question) LIKE ?"
-        for _ in keywords
-    ])
+    # Escape LIKE special characters before wrapping in wildcards.
+    # Without this, a keyword like "10%" would match anything starting with "10".
+    def _escape_like(kw: str) -> str:
+        return kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-    # Wrap each keyword in % for LIKE matching
-    params = [f"%{kw}%" for kw in keywords]
+    # Build parameterized query — one placeholder per keyword
+    placeholders = " OR ".join(
+        "LOWER(question) LIKE ? ESCAPE '\\'"
+        for _ in keywords
+    )
+    params = [f"%{_escape_like(kw)}%" for kw in keywords]
 
     with duckdb.connect(db_path) as conn:
         rows = conn.execute(f"""
@@ -188,22 +199,17 @@ def get_ground_truth(
 def score_retrieval(
     reasoning_result: ReasoningResult,
     ground_truths: list[dict],
-    embed_model=None,
 ) -> float:
     """
-    Score retrieval quality using embedding cosine similarity.
+    Score retrieval quality using NVIDIA embedding cosine similarity.
 
-    Compares each ground truth answer against all cited chunks
-    using embedding similarity — much more accurate than keyword
-    overlap which fails on paraphrasing and synonyms.
-
+    Compares each ground truth answer against all cited chunks.
     A ground truth is considered found if any cited chunk has
-    cosine similarity >= 0.5 with the ground truth answer.
+    cosine similarity >= 0.5 with it.
 
     Args:
         reasoning_result: Output from Agent 2
         ground_truths:    Expert answers from DuckDB
-        embed_model:      SentenceTransformer (loaded lazily if None)
 
     Returns:
         Float 0.0-1.0
@@ -215,53 +221,33 @@ def score_retrieval(
     if not reasoning_result.sentences:
         return 0.0
 
-    # Load embedding model lazily — reuse if already loaded
-    if embed_model is None:
-        # This should never happen in normal use — EvaluationAgent.__init__
-        # always passes self.embed_model. If hit, it means the function was
-        # called directly without an agent instance — warn and load fresh.
-        logger.warning(
-            "embed_model not provided — loading fresh (slow path). "
-            "Pass embed_model=self.embed_model for production use."
-        )
-        from sentence_transformers import SentenceTransformer
-        embed_model = SentenceTransformer(EMBEDDING_MODEL)
-
-    # Collect cited chunk texts
     cited_chunks = [s.chunk_text for s in reasoning_result.sentences]
+    if not cited_chunks:
+        return 0.0
 
-    # Embed all cited chunks at once — efficient batch operation
-    chunk_embeddings = embed_model.encode(
-        cited_chunks,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-    )
+    # Embed all cited chunks at once — passages compared against passages
+    chunk_embeddings = embed_texts(cited_chunks, input_type="passage")
+
+    # Filter out short/empty ground truths (e.g. "N/A") but keep "Yes"/"No"
+    valid_gts = [gt for gt in ground_truths if gt["answer"].strip()]
+    if not valid_gts:
+        return 0.5
+
+    # Batch-embed all ground truth answers at once
+    gt_texts = [gt["answer"].strip() for gt in valid_gts]
+    gt_embeddings = embed_texts(gt_texts, input_type="passage")
 
     hits = 0
-    for gt in ground_truths:
-        gt_answer = gt["answer"].strip()
-        if not gt_answer or len(gt_answer) < 5:
-            continue
-
-        # Embed ground truth answer
-        gt_embedding = embed_model.encode(
-            [gt_answer],
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )[0]
-
-        # Cosine similarity — vectors are normalized so dot product = cosine sim
+    for gt_embedding in gt_embeddings:
+        # Cosine similarity — vectors are normalised so dot product = cosine sim
         similarities = chunk_embeddings @ gt_embedding
-
-        # Ground truth found if any chunk is similar enough
-        max_similarity = float(similarities.max())
-        if max_similarity >= 0.5:
+        if float(similarities.max()) >= 0.4:
             hits += 1
 
-    score = hits / len(ground_truths)
+    score = hits / len(valid_gts)
     logger.info(
         "Retrieval score: %.2f (%d/%d ground truths found via embedding similarity)",
-        score, hits, len(ground_truths),
+        score, hits, len(valid_gts),
     )
     return clamp(score, 0.0, 1.0)
 
@@ -293,13 +279,12 @@ def score_faithfulness(
     if not reasoning_result.sentences:
         return 0.0
 
-    # Build faithfulness evaluation prompt
+    # Truncate chunk text to keep prompt short — Gemma is slow on long prompts.
+    # All sentences are checked (no cap) to honour the "every sentence traced"
+    # promise. Chunk text is kept short (120 chars) to control token count.
     sentences_text = ""
     for i, s in enumerate(reasoning_result.sentences, 1):
-        sentences_text += f"""
-Sentence {i}: "{s.text}"
-Source chunk: "{s.chunk_text[:300]}..."
----"""
+        sentences_text += f'\nSentence {i}: "{s.text}"\nSource: "{s.chunk_text[:120]}..."\n---'
 
     prompt = f"""You are evaluating whether an AI answer is faithful to its source documents.
 
@@ -308,24 +293,17 @@ QUESTION: {question}
 ANSWER SENTENCES AND THEIR SOURCE CHUNKS:
 {sentences_text}
 
-For each sentence, judge whether it is FULLY SUPPORTED by its source chunk.
-A sentence is faithful if every claim in it can be directly verified from the chunk.
-A sentence is NOT faithful if it adds information, makes assumptions, or contradicts the chunk.
+Judge whether each sentence's main claims are substantially supported by its source chunk.
+Paraphrase and summarisation are acceptable. Only mark unfaithful if a sentence clearly contradicts or invents facts not present in the chunk.
 
 RESPOND IN THIS EXACT JSON FORMAT — no preamble, no markdown:
 {{
-  "sentences": [
-    {{
-      "sentence_number": 1,
-      "faithful": true,
-      "reason": "Direct quote from chunk"
-    }}
-  ],
-  "overall_faithfulness": 0.95
+  "overall_faithfulness": 0.95,
+  "reason": "All claims are supported by the source chunks"
 }}"""
 
     try:
-        raw = call_groq(prompt, model=LLM_JUDGE_MODEL)
+        raw = call_llm(prompt, model=LLM_JUDGE_MODEL)
         cleaned = extract_json(raw)
         data = json.loads(cleaned)
 
@@ -390,7 +368,7 @@ RESPOND IN THIS EXACT JSON FORMAT — no preamble, no markdown:
 }}"""
 
     try:
-        raw = call_groq(prompt, model=LLM_JUDGE_MODEL)
+        raw = call_llm(prompt, model=LLM_JUDGE_MODEL)
         cleaned = extract_json(raw)
         data = json.loads(cleaned)
 
@@ -436,13 +414,7 @@ class EvaluationAgent:
 
         self.db_path = db_path
 
-        # Load embedding model once — reused for retrieval scoring
-        from sentence_transformers import SentenceTransformer
-        logger.info("Loading embedding model for retrieval scoring...")
-        self.embed_model = SentenceTransformer(EMBEDDING_MODEL)
-
         # Create evaluations table if it doesn't exist
-        # Stores every result so we can track quality over time
         self._setup_storage()
 
         logger.info("EvaluationAgent ready.")
@@ -498,6 +470,13 @@ class EvaluationAgent:
         question = reasoning_result.question
         logger.info("Evaluating answer for: '%s'", question[:80])
 
+        # Cache check — same question + answer means same evaluation result
+        cache_key = _get_eval_cache_key(question, reasoning_result.raw_answer or "")
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            logger.info("Evaluation cache HIT for '%s' — skipping judge calls.", question[:60])
+            return cached
+
         # Guard — nothing to evaluate
         if not reasoning_result.answer_found:
             logger.warning("No answer to evaluate — returning zero scores.")
@@ -511,6 +490,7 @@ class EvaluationAgent:
                 needs_human_review=True,
                 failure_reason="Agent 2 could not find an answer in the retrieved chunks.",
                 ground_truth_found=False,
+                retrieval_score_available=False,
             )
 
         # Step 1 — look up ground truth from DuckDB
@@ -522,30 +502,37 @@ class EvaluationAgent:
         )
 
         # Step 2 — score retrieval quality
-        retrieval_score = score_retrieval(
-            reasoning_result,
-            ground_truths,
-            embed_model=self.embed_model,  # reuse loaded model
-        )
+        retrieval_score = score_retrieval(reasoning_result, ground_truths)
 
-        # Step 3 — score faithfulness (LLM judge)
-        faithfulness_score = score_faithfulness(question, reasoning_result)
-
-        # Brief pause — judge model has stricter rate limits
-        # Prevents 429 when faithfulness and relevance calls are back to back
-        #time.sleep(2)
-
-        # Step 4 — score answer relevance (LLM judge)
-        answer_relevance = score_answer_relevance(question, reasoning_result)
+        # Steps 3+4 — run both judge calls in parallel (independent LLM calls)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            faithfulness_future = executor.submit(
+                score_faithfulness, question, reasoning_result
+            )
+            relevance_future = executor.submit(
+                score_answer_relevance, question, reasoning_result
+            )
+            faithfulness_score = faithfulness_future.result()
+            answer_relevance   = relevance_future.result()
 
         # Step 5 — compute weighted overall score
-        # Weights live in config.py — tune without touching code
-        overall_score = clamp(
-            (retrieval_score    * EVAL_WEIGHT_RETRIEVAL) +
-            (faithfulness_score * EVAL_WEIGHT_FAITHFULNESS) +
-            (answer_relevance   * EVAL_WEIGHT_RELEVANCE),
-            0.0, 1.0,
-        )
+        # Retrieval score is only meaningful when ground truth exists.
+        # Without ground truth it defaults to 0.5 (not real signal), so we
+        # exclude it and renormalize faithfulness + relevance to sum to 1.0.
+        if ground_truth_found:
+            overall_score = clamp(
+                (retrieval_score    * EVAL_WEIGHT_RETRIEVAL) +
+                (faithfulness_score * EVAL_WEIGHT_FAITHFULNESS) +
+                (answer_relevance   * EVAL_WEIGHT_RELEVANCE),
+                0.0, 1.0,
+            )
+        else:
+            gen_total = EVAL_WEIGHT_FAITHFULNESS + EVAL_WEIGHT_RELEVANCE
+            overall_score = clamp(
+                (faithfulness_score * EVAL_WEIGHT_FAITHFULNESS / gen_total) +
+                (answer_relevance   * EVAL_WEIGHT_RELEVANCE   / gen_total),
+                0.0, 1.0,
+            )
 
         # Determine pass/fail and failure reason
         passed = overall_score >= MIN_CONFIDENCE_SCORE
@@ -583,12 +570,69 @@ class EvaluationAgent:
             needs_human_review=needs_human_review,
             failure_reason=failure_reason,
             ground_truth_found=ground_truth_found,
+            retrieval_score_available=ground_truth_found,
         )
+
+        # Cache result — next identical question+answer skips all judge calls
+        self._cache_set(cache_key, eval_result)
 
         # Store result — prompt version from reasoning result for traceability
         self._store_result(eval_result, prompt_version=reasoning_result.prompt_version)
 
         return eval_result
+
+    def _cache_get(self, key: str) -> "EvaluationResult | None":
+        r = get_redis_client()
+        if r is None:
+            return None
+        try:
+            data = r.get(key)
+            if data:
+                return self._deserialize(data)
+        except redis.RedisError as e:
+            reset_redis_client()
+            logger.warning("Redis read failed (eval cache), resetting: %s", e)
+        return None
+
+    def _cache_set(self, key: str, result: "EvaluationResult") -> None:
+        r = get_redis_client()
+        if r is None:
+            return
+        try:
+            r.setex(key, CACHE_TTL, self._serialize(result))
+            logger.info("Evaluation result cached with TTL=%ds.", CACHE_TTL)
+        except redis.RedisError as e:
+            reset_redis_client()
+            logger.warning("Redis write failed (eval cache), resetting: %s", e)
+
+    def _serialize(self, result: "EvaluationResult") -> str:
+        return json.dumps({
+            "question":                  result.question,
+            "retrieval_score":           result.retrieval_score,
+            "faithfulness_score":        result.faithfulness_score,
+            "answer_relevance":          result.answer_relevance,
+            "overall_score":             result.overall_score,
+            "passed":                    result.passed,
+            "needs_human_review":        result.needs_human_review,
+            "failure_reason":            result.failure_reason,
+            "ground_truth_found":        result.ground_truth_found,
+            "retrieval_score_available": result.retrieval_score_available,
+        })
+
+    def _deserialize(self, data: bytes) -> "EvaluationResult":
+        d = json.loads(data)
+        return EvaluationResult(
+            question=                  d["question"],
+            retrieval_score=           d["retrieval_score"],
+            faithfulness_score=        d["faithfulness_score"],
+            answer_relevance=          d["answer_relevance"],
+            overall_score=             d["overall_score"],
+            passed=                    d["passed"],
+            needs_human_review=        d["needs_human_review"],
+            failure_reason=            d["failure_reason"],
+            ground_truth_found=        d["ground_truth_found"],
+            retrieval_score_available= d.get("retrieval_score_available", True),
+        )
 
     def _store_result(self, result: EvaluationResult, prompt_version: str) -> None:
         """

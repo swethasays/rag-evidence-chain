@@ -22,10 +22,10 @@ import os
 import sys
 
 import duckdb
-import faiss
 import numpy as np
+from openai import OpenAI
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import CrossEncoder
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -33,20 +33,15 @@ from config import (
     DB_PATH,
     EMBEDDING_MODEL,
     FAISS_INDEX_PATH,
+    NVIDIA_API_BASE,
+    NVIDIA_API_KEY,
     TOP_K_RETRIEVAL,
     TOP_K_RERANK,
 )
+from data.vectorstore.faiss_store import FaissStore
+from observability.logging import get_logger
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,89 +53,66 @@ RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
 # ---------------------------------------------------------------------------
+# NVIDIA embedding client — lazy singleton
+# ---------------------------------------------------------------------------
+
+_nvidia_client: OpenAI | None = None
+
+
+def get_nvidia_client() -> OpenAI:
+    """Return the NVIDIA API client, creating it on first call."""
+    global _nvidia_client
+    if _nvidia_client is None:
+        if not NVIDIA_API_KEY:
+            raise ValueError(
+                "NVIDIA_API_KEY is not set. Add it to your .env file."
+            )
+        _nvidia_client = OpenAI(base_url=NVIDIA_API_BASE, api_key=NVIDIA_API_KEY)
+    return _nvidia_client
+
+
+# ---------------------------------------------------------------------------
 # Embedding
 # ---------------------------------------------------------------------------
 
-def load_embedding_model() -> SentenceTransformer:
-    """
-    Load the sentence embedding model.
-
-    We use all-MiniLM-L6-v2 — small, fast, good quality.
-    384 dimensions means each chunk becomes 384 numbers.
-    Downloads automatically on first run (~80MB).
-    """
-    logger.info("Loading embedding model: %s", EMBEDDING_MODEL)
-    model = SentenceTransformer(EMBEDDING_MODEL)
-    logger.info("Embedding model loaded.")
-    return model
+_EMBED_BATCH = 32  # NVIDIA recommends batches ≤ 32 for embeddings
 
 
-def embed_texts(model: SentenceTransformer, texts: list[str]) -> np.ndarray:
+def embed_texts(texts: list[str], input_type: str = "passage") -> np.ndarray:
     """
-    Convert a list of strings into a 2D numpy array of embeddings.
+    Embed a list of strings using NVIDIA nv-embedqa-e5-v5.
 
     Args:
-        model:  The loaded SentenceTransformer model
-        texts:  List of strings to embed
+        texts:      Strings to embed
+        input_type: "passage" for documents/chunks, "query" for search questions.
+                    This is required by nv-embedqa-e5-v5 to select the correct
+                    projection head — wrong type degrades retrieval quality.
 
     Returns:
-        numpy array of shape (len(texts), 384)
-        Each row is one embedding vector.
+        L2-normalised float32 array of shape (len(texts), 1024)
     """
-    embeddings = model.encode(
-        texts,
-        batch_size=64,          # process 64 chunks at a time
-        show_progress_bar=True, # shows progress for large batches
-        normalize_embeddings=True,  # L2 normalize for cosine similarity
-    )
-    return embeddings.astype(np.float32)  # FAISS requires float32
+    client = get_nvidia_client()
+    all_embeddings: list[list[float]] = []
 
-
-# ---------------------------------------------------------------------------
-# FAISS Index
-# ---------------------------------------------------------------------------
-
-def build_faiss_index(embeddings: np.ndarray) -> faiss.Index:
-    """
-    Build a FAISS index from a matrix of embeddings.
-
-    We use IndexFlatIP (Inner Product) which is equivalent to
-    cosine similarity when embeddings are L2-normalized.
-
-    Args:
-        embeddings: numpy array of shape (n_chunks, 384)
-
-    Returns:
-        A searchable FAISS index
-    """
-    n_chunks, dim = embeddings.shape
-    logger.info("Building FAISS index for %d chunks (dim=%d)", n_chunks, dim)
-
-    # IndexFlatIP = exact search using inner product (cosine similarity)
-    # For production with millions of vectors, use IndexIVFFlat instead
-    index = faiss.IndexFlatIP(dim)
-    index.add(embeddings)
-
-    logger.info("FAISS index built with %d vectors.", index.ntotal)
-    return index
-
-
-def save_faiss_index(index: faiss.Index, path: str = FAISS_INDEX_PATH) -> None:
-    """Save FAISS index to disk so we don't rebuild it every time."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    faiss.write_index(index, path)
-    logger.info("FAISS index saved to %s", path)
-
-
-def load_faiss_index(path: str = FAISS_INDEX_PATH) -> faiss.Index:
-    """Load a previously saved FAISS index from disk."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"FAISS index not found at '{path}'.\n"
-            "Run build_vector_index() first."
+    for i in range(0, len(texts), _EMBED_BATCH):
+        batch = texts[i : i + _EMBED_BATCH]
+        response = client.embeddings.create(
+            input=batch,
+            model=EMBEDDING_MODEL,
+            encoding_format="float",
+            extra_body={"input_type": input_type, "truncate": "NONE"},
         )
-    logger.info("Loading FAISS index from %s", path)
-    return faiss.read_index(path)
+        # Response items are ordered to match the input batch
+        all_embeddings.extend(item.embedding for item in response.data)
+
+    arr = np.array(all_embeddings, dtype=np.float32)
+
+    # Normalize to unit length — ensures inner product == cosine similarity
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)  # guard against zero vectors
+    return arr / norms
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -220,24 +192,24 @@ def load_chunks_from_db(db_path: str = DB_PATH) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Vector index builder (run once)
 # ---------------------------------------------------------------------------
-def build_vector_index(
-    model: SentenceTransformer,
-    chunks: list[dict],
-) -> faiss.Index:
+def build_vector_index(chunks: list[dict]) -> FaissStore:
     """
-    One-time setup: embed all chunks and build the FAISS index.
+    One-time setup: embed all chunks via NVIDIA API and persist a FaissStore.
 
-    This takes ~2-3 minutes for 7,764 chunks.
+    Chunks use input_type="passage" — required by nv-embedqa-e5-v5.
     The index is saved to disk so subsequent runs load it instantly.
 
     Returns:
-        faiss_index
+        Populated FaissStore ready for search
     """
     texts = [chunk["text"] for chunk in chunks]
-    embeddings = embed_texts(model, texts)
-    index = build_faiss_index(embeddings)
-    save_faiss_index(index)
-    return index
+    ids   = [chunk["id"]   for chunk in chunks]
+    logger.info("Embedding %d chunks via NVIDIA API (input_type=passage)...", len(texts))
+    embeddings = embed_texts(texts, input_type="passage")
+    store = FaissStore()
+    store.add(ids, embeddings)
+    store.save(FAISS_INDEX_PATH)
+    return store
 
 # ---------------------------------------------------------------------------
 # Retrieval Agent
@@ -261,31 +233,27 @@ class RetrievalAgent:
         # Load all chunks from DuckDB into memory
         self.chunks = load_chunks_from_db()
 
-        # Load embedding model for encoding questions
-        self.embed_model = load_embedding_model()
+        # O(1) chunk lookup by ID — used in _semantic_search after FaissStore
+        # returns (chunk_id, score) pairs instead of integer indices
+        self.chunk_index: dict[str, dict] = {c["id"]: c for c in self.chunks}
 
-        # Load or build FAISS index
-        if os.path.exists(FAISS_INDEX_PATH):
-            self.faiss_index = load_faiss_index()
+        # Load or build FaissStore
+        ids_path = FAISS_INDEX_PATH + ".ids"
+        if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(ids_path):
+            self.vector_store = FaissStore()
+            self.vector_store.load(FAISS_INDEX_PATH)
 
-            # Guard — verify FAISS and chunks are in sync
-            # If ingest.py was re-run without rebuilding FAISS,
-            # the index would return wrong chunks silently
-            if self.faiss_index.ntotal != len(self.chunks):
+            # Guard — verify store and DB are in sync.
+            # Rebuilds if ingest.py was re-run without rebuilding the index.
+            if self.vector_store.count() != len(self.chunks):
                 logger.warning(
-                    "FAISS index is out of sync with database! "
-                    "Index has %d vectors but database has %d chunks. "
-                    "Rebuilding FAISS index...",
-                    self.faiss_index.ntotal,
-                    len(self.chunks),
+                    "Vector store out of sync: %d vectors vs %d chunks. Rebuilding...",
+                    self.vector_store.count(), len(self.chunks),
                 )
-                self.faiss_index = build_vector_index(
-                    self.embed_model, self.chunks
-                )
+                self.vector_store = build_vector_index(self.chunks)
         else:
-            logger.info("No FAISS index found — building from scratch...")
-            # Pass already-loaded model and chunks — avoids loading twice
-            self.faiss_index = build_vector_index(self.embed_model, self.chunks)
+            logger.info("No vector index found — building from scratch...")
+            self.vector_store = build_vector_index(self.chunks)
 
         # Build BM25 index (fast, in-memory)
         self.bm25_index = build_bm25_index(self.chunks)
@@ -305,21 +273,18 @@ class RetrievalAgent:
 
         Returns list of chunk dicts with added 'semantic_score'.
         """
-        # Embed the question — same model as chunks
-        q_embedding = self.embed_model.encode(
-            [question],
-            normalize_embeddings=True,
-        ).astype(np.float32)
-
-        # Search FAISS — returns distances and indices
-        scores, indices = self.faiss_index.search(q_embedding, top_k)
+        # Embed question with input_type="query" — nv-embedqa-e5-v5 uses a
+        # separate projection head for queries vs passages
+        q_vec = embed_texts([question], input_type="query")[0]
 
         results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx == -1:  # FAISS returns -1 for empty slots
+        for chunk_id, score in self.vector_store.search(q_vec, top_k):
+            chunk = self.chunk_index.get(chunk_id)
+            if chunk is None:
+                logger.warning("Vector store returned unknown chunk_id: %s", chunk_id)
                 continue
-            chunk = self.chunks[idx].copy()
-            chunk["semantic_score"] = float(score)
+            chunk = chunk.copy()
+            chunk["semantic_score"] = score
             results.append(chunk)
 
         return results
@@ -426,6 +391,7 @@ class RetrievalAgent:
         self,
         question: str,
         filters: dict = None,
+        top_k: int = TOP_K_RETRIEVAL,
     ) -> list[dict]:
         """
         Main entry point — find the most relevant chunks for a question.
@@ -436,9 +402,12 @@ class RetrievalAgent:
                       Supported keys:
                         - contract_id    : only search this contract
                         - contract_title : only search this contract title
+            top_k:    Candidate pool size for semantic + keyword search.
+                      The pipeline expands this on retries to widen the search.
+                      The final reranked result is always capped at TOP_K_RERANK.
 
         Returns:
-            Top-5 chunk dicts with scores and metadata.
+            Top-k reranked chunk dicts with scores and metadata.
             Returns empty list if no chunks match the filters.
         """
         logger.info("Searching for: '%s'", question[:80])
@@ -446,8 +415,8 @@ class RetrievalAgent:
         if filters:
             logger.info("Applying filters: %s", filters)
 
-        semantic = self._semantic_search(question)
-        keyword  = self._keyword_search(question)
+        semantic = self._semantic_search(question, top_k=top_k)
+        keyword  = self._keyword_search(question, top_k=top_k)
         merged   = self._merge_results(semantic, keyword)
 
         # Apply metadata filters AFTER retrieval

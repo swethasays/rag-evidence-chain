@@ -19,26 +19,17 @@ Flow:
 import logging
 import os
 import sys
+import time
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import MIN_CONFIDENCE_SCORE, TOP_K_RETRIEVAL
+from config import HUMAN_REVIEW_FLAG, MIN_CONFIDENCE_SCORE, TOP_K_RETRIEVAL
 from agents.retrieval import RetrievalAgent
 from agents.reasoning import ReasoningAgent, ReasoningResult
 from agents.evaluation import EvaluationAgent, EvaluationResult
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 
 from observability.logging import get_logger
 from observability.tracing import setup_tracing
@@ -58,7 +49,11 @@ MAX_RETRIES = 2
 
 # Minimum retrieval score to accept without retrying
 # Below this — try a different retrieval strategy
-MIN_RETRIEVAL_SCORE = 0.3
+# CUAD ground truth answers are very specific clause-level annotations;
+# retrieved chunks are broader passages, so similarity naturally lands in
+# the 0.1-0.3 range even for good retrievals. Only retry when chunks are
+# essentially absent (score near 0), not just below 0.3.
+MIN_RETRIEVAL_SCORE = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +102,7 @@ def retrieve_node(state: PipelineState, retrieval_agent: RetrievalAgent) -> dict
     retry_count = state.get("retry_count", 0)
     filters     = state.get("filters", None)  # ← get filters from state
 
+    # Expand the candidate pool on each retry — more context for the LLM
     expanded_top_k = TOP_K_RETRIEVAL * (1 + retry_count)
 
     logger.info(
@@ -116,19 +112,17 @@ def retrieve_node(state: PipelineState, retrieval_agent: RetrievalAgent) -> dict
         question[:60],
     )
 
-    chunks         = retrieval_agent._semantic_search(question, top_k=expanded_top_k)
-    keyword_chunks = retrieval_agent._keyword_search(question, top_k=expanded_top_k)
-    merged         = retrieval_agent._merge_results(chunks, keyword_chunks)
-
-    # Apply filters before reranking — not after
-    if filters:
-        merged = retrieval_agent._apply_filters(merged, filters)
-
-    reranked = retrieval_agent._rerank(question, merged)
+    t0 = time.monotonic()
+    reranked = retrieval_agent.search(
+        question,
+        filters=filters,
+        top_k=expanded_top_k,
+    )
+    elapsed_ms = (time.monotonic() - t0) * 1000
 
     logger.info(
-        "Retrieved %d chunks (expanded top_k=%d on retry %d).",
-        len(reranked), expanded_top_k, retry_count,
+        "Node: retrieve done in %.0fms — %d chunks returned.",
+        elapsed_ms, len(reranked),
     )
 
     return {
@@ -140,7 +134,7 @@ def reason_node(state: PipelineState, reasoning_agent: ReasoningAgent) -> dict:
     """
     Node 2 — form a cited answer using Agent 2.
 
-    Sends retrieved chunks to Groq LLM with structured prompt.
+    Sends retrieved chunks to the NVIDIA LLM with a structured prompt.
     Returns answer with every sentence linked to its source chunk.
 
     Args:
@@ -155,7 +149,11 @@ def reason_node(state: PipelineState, reasoning_agent: ReasoningAgent) -> dict:
 
     logger.info("Node: reason — forming answer from %d chunks.", len(chunks))
 
+    t0 = time.monotonic()
     reasoning_result = reasoning_agent.reason(question, chunks)
+    elapsed_ms = (time.monotonic() - t0) * 1000
+
+    logger.info("Node: reason done in %.0fms — answer_found=%s.", elapsed_ms, reasoning_result.answer_found)
 
     return {
         "reasoning_result": reasoning_result,
@@ -185,17 +183,18 @@ def evaluate_node(state: PipelineState, evaluation_agent: EvaluationAgent) -> di
 
     logger.info("Node: evaluate — scoring answer quality.")
 
+    t0 = time.monotonic()
     try:
         eval_result = evaluation_agent.evaluate(reasoning_result)
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info("Node: evaluate done in %.0fms — overall=%.2f passed=%s.", elapsed_ms, eval_result.overall_score, eval_result.passed)
 
     except Exception as e:
-        # Evaluation failed — log the error but don't crash the graph
-        # Return a safe fallback that routes to human review
-        # The None-guard in run() handles missing eval_result,
-        # but a fallback here is cleaner — graph still completes normally
+        elapsed_ms = (time.monotonic() - t0) * 1000
         logger.error(
-            "Evaluation node failed unexpectedly: %s. "
-            "Returning fallback result and flagging for human review.", e,
+            "Node: evaluate failed after %.0fms: %s. "
+            "Returning fallback result and flagging for human review.",
+            elapsed_ms, e,
         )
 
         eval_result = EvaluationResult(
@@ -208,6 +207,7 @@ def evaluate_node(state: PipelineState, evaluation_agent: EvaluationAgent) -> di
             needs_human_review=True,
             failure_reason=f"Evaluation failed: {type(e).__name__}: {e}",
             ground_truth_found=False,
+            retrieval_score_available=False,
         )
 
     return {
@@ -355,8 +355,7 @@ class RAGPipeline:
                     # Guard — reasoning_result may be None if pipeline failed
                     # before Agent 2 completed. Fallback to empty string.
                     (getattr(state.get("reasoning_result"), "raw_answer", "") or "") +
-                    "\n\n[⚠️ This answer has been flagged for human review "
-                    "due to low confidence scores.]"
+                    f"\n\n{HUMAN_REVIEW_FLAG}"
                 ),
             }
         )
@@ -461,10 +460,11 @@ class RAGPipeline:
                 for s in reasoning_result.sentences
             ],
             "eval_scores": {
-                "retrieval":    eval_result.retrieval_score,
-                "faithfulness": eval_result.faithfulness_score,
-                "relevance":    eval_result.answer_relevance,
-                "overall":      eval_result.overall_score,
+                "retrieval":                 eval_result.retrieval_score,
+                "faithfulness":              eval_result.faithfulness_score,
+                "relevance":                 eval_result.answer_relevance,
+                "overall":                   eval_result.overall_score,
+                "retrieval_score_available": eval_result.retrieval_score_available,
             },
             "needs_human_review": final_state["needs_human_review"],
             "passed":             eval_result.passed,

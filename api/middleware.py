@@ -53,14 +53,16 @@ def add_middleware(app: FastAPI) -> None:
     Args:
         app: The FastAPI application instance
     """
-    # CORS — allow requests from UI and local development
+    # CORS — allow requests from UI and local development.
+    # CORSMiddleware does not support glob patterns in allow_origins — use
+    # allow_origin_regex for subdomain wildcards (e.g. HuggingFace Spaces).
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
             "http://localhost:8501",   # Streamlit local
             "http://localhost:3000",   # React local (future)
-            "https://*.hf.space",      # HuggingFace Spaces
         ],
+        allow_origin_regex=r"https://[a-zA-Z0-9-]+\.hf\.space",
         allow_credentials=True,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],

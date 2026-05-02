@@ -18,7 +18,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import duckdb
 
-from config import DB_PATH
+from config import DB_PATH, HUMAN_REVIEW_FLAG, MIN_CONFIDENCE_SCORE
 from agents.graph import RAGPipeline
 
 # ---------------------------------------------------------------------------
@@ -368,7 +368,9 @@ st.markdown("""
 # Helpers
 # ---------------------------------------------------------------------------
 
-def clean_contract_name(raw: str) -> str:
+def clean_contract_name(raw: str | None) -> str:
+    if not raw:
+        return "Unknown Contract"
     ex_match = re.search(r'EX-[\d.]+[-_](.+)$', raw, re.IGNORECASE)
     if ex_match:
         desc = ex_match.group(1).replace('_', ' ').replace('-', ' ').strip()
@@ -464,7 +466,7 @@ COVERED_TOPICS = [
 METRIC_TOOLTIPS = {
     "Faithfulness": "Is every sentence grounded in the source text? High score = no hallucination.",
     "Relevance":    "Does the answer address what you asked? High score = directly on-topic.",
-    "Overall":      "Combined score. 0.70 or above passes quality checks.",
+    "Overall":      f"Combined score. {MIN_CONFIDENCE_SCORE:.2f} or above passes quality checks.",
 }
 
 # ---------------------------------------------------------------------------
@@ -652,8 +654,7 @@ if run_search:
                         unsafe_allow_html=True)
 
         # ── Answer ───────────────────────────────────────────────────────────
-        answer_text = result["answer"].replace(
-            "\n\n[⚠️ This answer has been flagged for human review due to low confidence scores.]", "")
+        answer_text = result["answer"].replace(f"\n\n{HUMAN_REVIEW_FLAG}", "")
         st.markdown(f'<div class="answer-text">{answer_text}</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -703,7 +704,7 @@ if run_search:
                 {score_bar_html("Relevance",    scores["relevance"],    METRIC_TOOLTIPS["Relevance"])}
                 <div class="score-divider"></div>
                 {score_bar_html("Overall",      scores["overall"],      METRIC_TOOLTIPS["Overall"])}
-                <div class="score-threshold">Pass threshold · 0.70</div>
+                <div class="score-threshold">Pass threshold · {MIN_CONFIDENCE_SCORE:.2f}</div>
             </div>""", unsafe_allow_html=True)
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)

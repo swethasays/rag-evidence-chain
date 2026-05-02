@@ -65,10 +65,11 @@ class CitedSentenceResponse(BaseModel):
 
 class EvalScoresResponse(BaseModel):
     """Evaluation scores for the pipeline run."""
-    retrieval:    float
-    faithfulness: float
-    relevance:    float
-    overall:      float
+    retrieval:                 float
+    faithfulness:              float
+    relevance:                 float
+    overall:                   float
+    retrieval_score_available: bool = True  # False when no ground truth exists — retrieval score is 0.5 placeholder
 
 
 class PipelineResponse(BaseModel):

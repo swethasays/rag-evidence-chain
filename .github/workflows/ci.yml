@@ -46,7 +46,7 @@ jobs:
       - name: Create test environment
         run: |
           cat > .env << 'EOF'
-          GROQ_API_KEY=test_key
+          NVIDIA_API_KEY=test_key
           LANGCHAIN_API_KEY=test_key
           LANGCHAIN_PROJECT=rag-evidence-chain
           REDIS_URL=redis://localhost:6379

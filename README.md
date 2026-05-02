@@ -233,3 +233,11 @@ The config stubs for Pinecone, S3, and GCP are already in `config.py` — each s
 ## Author
 
 Built by [@swethasays](https://github.com/swethasays)
+
+---
+
+## Learnings
+
+A detailed write-up of the real problems hit, decisions made, and what each one taught me — from latency debugging to silent cache failures to why two model families are used deliberately.
+
+→ [LEARNINGS.md](LEARNINGS.md)

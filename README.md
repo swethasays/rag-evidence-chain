@@ -158,7 +158,7 @@ X-API-Key: your_key_here
 | Query | Latency |
 |---|---|
 | First query (cold) | ~20s |
-| Repeat query (cache hit) | ~2s |
+| Repeat query (cache hit) | ~0.4s |
 
 First queries are slow by design — each one makes three remote API calls: an embedding model, LLaMA 3.3 70B for reasoning (~9s), and Gemma 3 4B for evaluation. That's the cost of the pipeline, not a bug.
 
